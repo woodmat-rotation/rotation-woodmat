@@ -8,21 +8,16 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================================
-# WOODMAT — ROTATION STOCK (Web App)
+# WOODMAT — ROTATION DU STOCK (Web App)
 # ============================================================
 
-st.set_page_config(page_title="WOODMAT — Rotation Stock", layout="wide",
+st.set_page_config(page_title="WOODMAT — Rotation du stock", layout="wide",
                     page_icon="📦", initial_sidebar_state="expanded")
 
-BASE_HISTORIQUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_mouvements.pkl")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_HISTORIQUE = os.path.join(APP_DIR, "base_mouvements.pkl")  # base 2020-2025, livrée avec l'app
 SEUIL = 0.001
 
-CAT_COLORS = {
-    'BOIS BLANC': '#1F3864', 'BOIS ROUGE': '#8B0000', 'CHENE': '#4B2E0A',
-    'CONTREPLAQUE': '#1E5631', 'EXOTIQUE': '#1B5E20', 'FRENE': '#33691E',
-    'MDF': '#2C3E50', 'MDF DECORE': '#1A5276', 'OSB': '#784212',
-    'PANNEAUX PARTICULES': '#37474F', 'PARQUET': '#6D4C41',
-}
 CLASS_COLORS = {
     'Excellent': '#C6EFCE', 'Bon': '#E2EFDA', 'Stock élevé': '#FFEB9C',
     'Dormant': '#F4B942', 'Rupture': '#FFC7CE',
@@ -42,7 +37,7 @@ def check_login():
     with col2:
         st.markdown(
             "<div style='text-align:center'><h1 style='color:#1F3864'>WOODMAT</h1>"
-            "<p style='color:#888'>Rotation de Stock — Accès sécurisé</p></div>",
+            "<p style='color:#888'>Rotation du stock — Accès sécurisé</p></div>",
             unsafe_allow_html=True)
         with st.form("login_form"):
             user = st.text_input("Utilisateur")
@@ -60,21 +55,28 @@ def check_login():
 
 
 # ============================================================
-# CHARGEMENT / CALCUL (logique reprise de rotation_app_v11.py)
+# CHARGEMENT / CALCUL — vectorisé pour performance (60 000+ lignes)
 # ============================================================
 
-def parse_qty(q):
-    if pd.isna(q) or str(q).strip() == '':
-        return 0.0
-    q = str(q).replace(' ', '').replace(',', '.').replace('-', '').replace('+', '').strip()
-    try:
-        return float(q)
-    except Exception:
-        return 0.0
+def parse_qty_series(s):
+    """Nettoyage + conversion numérique vectorisée (rapide sur gros volumes)."""
+    s = s.astype(str).str.strip()
+    s = (s.str.replace(' ', '', regex=False)
+          .str.replace(',', '.', regex=False)
+          .str.replace('-', '', regex=False)
+          .str.replace('+', '', regex=False))
+    return pd.to_numeric(s, errors='coerce').fillna(0.0)
 
 
-def charger_mouv(file_bytes):
-    df = pd.read_excel(file_bytes)
+def parse_dates_series(s):
+    d = pd.to_datetime(s, format='%d-%m-%y %H:%M:%S', errors='coerce')
+    mask = d.isna()
+    if mask.any():
+        d.loc[mask] = pd.to_datetime(s[mask], dayfirst=True, errors='coerce')
+    return d
+
+
+def normaliser_mouv(df):
     if not str(df.columns[0]).upper().startswith('DATE'):
         df.columns = df.iloc[0]
         df = df.iloc[1:].reset_index(drop=True)
@@ -87,11 +89,22 @@ def charger_mouv(file_bytes):
         df.columns = ['Date', 'ES', 'Document', 'Tiers', 'Reference', 'Quantite', 'Unite',
                       'PU_HT', 'Solde', 'Depot', 'Categorie', 'Sous_Cat', 'Marque'][:ncols]
 
-    df['Qty'] = df['Quantite'].apply(parse_qty)
-    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+    df['Qty'] = parse_qty_series(df['Quantite'])
+    df['Date'] = parse_dates_series(df['Date'])
     df = df[df['ES'].isin(['S', 'E', 'ME', 'TE'])]
     df = df.drop_duplicates(subset=['Date', 'ES', 'Document', 'Reference', 'Quantite'])
     return df
+
+
+def charger_mouv_upload(file_bytes):
+    df = pd.read_excel(file_bytes)
+    return normaliser_mouv(df)
+
+
+@st.cache_resource(show_spinner=False)
+def charger_base_historique():
+    """Base 2020-2025 livrée avec l'app — lue une seule fois, gardée en mémoire serveur."""
+    return pd.read_pickle(BASE_HISTORIQUE)
 
 
 @st.cache_data(show_spinner=False)
@@ -104,7 +117,7 @@ def calculer_indicateurs(df_mv, df_st_bytes):
         df_st.rename(columns={_unite_col: 'Unité V.'}, inplace=True)
     elif _unite_col is None:
         df_st['Unité V.'] = 'M3'
-    df_st['Qty_s'] = df_st['Quantité'].apply(parse_qty)
+    df_st['Qty_s'] = parse_qty_series(df_st['Quantité'])
     df_st_c = df_st.groupby('Référence').agg(
         Stock=('Qty_s', 'sum'), Cat=('Catégorie', 'first'), Unite=('Unité V.', 'first')).reset_index()
     df_st_c = df_st_c[df_st_c['Cat'].notna()]
@@ -112,7 +125,6 @@ def calculer_indicateurs(df_mv, df_st_bytes):
 
     date_max = df_mv['Date'].max()
     date_12m_debut = date_max - pd.DateOffset(months=12)
-    nb_mois_12m = 12.0
 
     sorties = df_mv[df_mv['ES'] == 'S']
     entrees = df_mv[df_mv['ES'].isin(['E', 'ME', 'TE'])]
@@ -134,40 +146,54 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     for c in ['Total_Sorti', 'Nb_Trans', 'S_12M', 'T_12M', 'A_12M']:
         sm[c] = sm[c].fillna(0)
 
+    nb_mois_12m = 12.0
+    # Calculs vectorisés (pas d'apply row-wise — rapide même sur beaucoup de références)
     sm['Moy_Mois'] = (sm['S_12M'] / nb_mois_12m).round(3)
-    sm['Taux_Rot'] = sm.apply(lambda r: round((r['Moy_Mois'] / r['Stock']) * 100, 1)
-                               if r['Stock'] > SEUIL and r['Moy_Mois'] > 0 else 0, axis=1)
-    sm['Rotation'] = sm.apply(lambda r: round(r['S_12M'] / r['Stock'], 2)
-                               if r['Stock'] > SEUIL and r['S_12M'] > 0 else 0, axis=1)
-    sm['Couverture'] = sm.apply(lambda r: round(r['Stock'] / r['Moy_Mois'], 1)
-                                 if r['Moy_Mois'] > 0 and r['Stock'] > SEUIL else 0, axis=1)
-    sm['Delai'] = sm.apply(lambda r: round(365 / r['Rotation'], 0) if r['Rotation'] > 0 else 0, axis=1)
-    sm['Taux_Immob'] = sm.apply(lambda r: round(min(100.0, (r['Couverture'] / 12) * 100), 1)
-                                 if r['Couverture'] > 0 else (100.0 if r['Stock'] > SEUIL else 0), axis=1)
+    stock_ok = sm['Stock'] > SEUIL
 
-    def cls(row):
-        if row['Stock'] <= SEUIL:
-            return 'Rupture'
-        if row['S_12M'] == 0:
-            return 'Dormant' if row['Total_Sorti'] > 0 else 'Aucun mouvement 12M'
-        t = row['Taux_Rot']
-        if t >= 20:
-            return 'Excellent'
-        elif t >= 10:
-            return 'Bon'
-        else:
-            return 'Stock élevé'
+    sm['Taux_Rot'] = 0.0
+    m = stock_ok & (sm['Moy_Mois'] > 0)
+    sm.loc[m, 'Taux_Rot'] = ((sm.loc[m, 'Moy_Mois'] / sm.loc[m, 'Stock']) * 100).round(1)
 
-    sm['Class'] = sm.apply(cls, axis=1)
+    sm['Rotation'] = 0.0
+    m = stock_ok & (sm['S_12M'] > 0)
+    sm.loc[m, 'Rotation'] = (sm.loc[m, 'S_12M'] / sm.loc[m, 'Stock']).round(2)
+
+    sm['Couverture'] = 0.0
+    m = (sm['Moy_Mois'] > 0) & stock_ok
+    sm.loc[m, 'Couverture'] = (sm.loc[m, 'Stock'] / sm.loc[m, 'Moy_Mois']).round(1)
+
+    sm['Delai'] = 0.0
+    m = sm['Rotation'] > 0
+    sm.loc[m, 'Delai'] = (365 / sm.loc[m, 'Rotation']).round(0)
+
+    sm['Taux_Immob'] = 0.0
+    m = sm['Couverture'] > 0
+    sm.loc[m, 'Taux_Immob'] = (sm.loc[m, 'Couverture'] / 12 * 100).clip(upper=100.0).round(1)
+    sm.loc[(~m) & stock_ok, 'Taux_Immob'] = 100.0
+
+    conditions_rupture = sm['Stock'] <= SEUIL
+    conditions_dormant = (~conditions_rupture) & (sm['S_12M'] == 0) & (sm['Total_Sorti'] > 0)
+    conditions_aucun = (~conditions_rupture) & (sm['S_12M'] == 0) & (sm['Total_Sorti'] == 0)
+    conditions_excellent = (~conditions_rupture) & (sm['S_12M'] > 0) & (sm['Taux_Rot'] >= 20)
+    conditions_bon = (~conditions_rupture) & (sm['S_12M'] > 0) & (sm['Taux_Rot'] >= 10) & (sm['Taux_Rot'] < 20)
+
+    sm['Class'] = 'Stock élevé'
+    sm.loc[conditions_rupture, 'Class'] = 'Rupture'
+    sm.loc[conditions_dormant, 'Class'] = 'Dormant'
+    sm.loc[conditions_aucun, 'Class'] = 'Aucun mouvement 12M'
+    sm.loc[conditions_excellent, 'Class'] = 'Excellent'
+    sm.loc[conditions_bon, 'Class'] = 'Bon'
+
     return sm, date_max, date_12m_debut
 
 
 def evolution_mensuelle(df_mv, references=None):
-    d = df_mv[df_mv['ES'] == 'S'].copy()
+    d = df_mv[df_mv['ES'] == 'S']
     if references is not None:
         d = d[d['Reference'].isin(references)]
-    d['Mois'] = d['Date'].dt.to_period('M').dt.to_timestamp()
-    return d.groupby('Mois')['Qty'].sum().reset_index()
+    mois = d['Date'].dt.to_period('M').dt.to_timestamp()
+    return d.groupby(mois)['Qty'].sum().reset_index(names='Mois')
 
 
 # ============================================================
@@ -177,52 +203,46 @@ def evolution_mensuelle(df_mv, references=None):
 if not check_login():
     st.stop()
 
+if not os.path.exists(BASE_HISTORIQUE):
+    st.error("⚠️ La base historique (base_mouvements.pkl) n'est pas présente dans le déploiement. "
+             "Elle doit être livrée avec l'application — contactez l'administrateur.")
+    st.stop()
+
 with st.sidebar:
     st.markdown(f"### 📦 WOODMAT\n**Connecté :** {st.session_state.get('auth_user','')}")
     if st.button("Se déconnecter"):
         st.session_state.clear()
         st.rerun()
     st.divider()
+    st.caption("La base historique 2020–2025 est intégrée à l'application — rien à importer.")
 
-    st.markdown("**1. Base historique mouvements**")
-    base_ok = os.path.exists(BASE_HISTORIQUE)
-    if base_ok:
-        st.success("Base chargée sur le serveur ✅")
-    f_base = st.file_uploader("Importer / remplacer la base (xlsx)", type=["xlsx", "xls"], key="base")
-    if f_base is not None:
-        with st.spinner("Import de la base historique..."):
-            df_new = charger_mouv(f_base)
-            df_new.to_pickle(BASE_HISTORIQUE)
-            st.cache_data.clear()
-        st.success(f"Base importée : {len(df_new):,} lignes")
-        st.rerun()
+    st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
+    f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
 
-    st.markdown("**2. Mouvements récents (optionnel)**")
-    f_mouv = st.file_uploader("Fichier mouvements période récente", type=["xlsx", "xls"], key="mouv")
-
-    st.markdown("**3. Stock actuel (export ERP)**")
-    f_stock = st.file_uploader("Fichier stock actuel", type=["xlsx", "xls"], key="stock")
+    st.markdown("**2. Stock actuel** _(obligatoire, export du jour)_")
+    f_stock = st.file_uploader("Export ERP stock actuel", type=["xlsx", "xls"], key="stock")
 
     lancer = st.button("🔄 Générer l'analyse", type="primary", use_container_width=True)
 
-st.markdown("<h2 style='color:#1F3864;margin-bottom:0'>WOODMAT — Rotation de Stock</h2>", unsafe_allow_html=True)
+st.markdown("<h2 style='color:#1F3864;margin-bottom:0'>WOODMAT — Rotation du stock</h2>", unsafe_allow_html=True)
 st.caption("Dashboard interactif — indicateurs calculés sur une fenêtre glissante de 12 mois")
 
 if "sm" not in st.session_state:
     st.session_state["sm"] = None
 
 if lancer:
-    if not os.path.exists(BASE_HISTORIQUE):
-        st.error("Importez d'abord la base historique dans la barre latérale.")
-    elif f_stock is None:
+    if f_stock is None:
         st.error("Choisissez le fichier stock actuel.")
     else:
         with st.spinner("Calcul des indicateurs de rotation..."):
-            df_base = pd.read_pickle(BASE_HISTORIQUE)
+            df_base = charger_base_historique()
             if f_mouv is not None:
-                df_recent = charger_mouv(f_mouv)
+                df_recent = charger_mouv_upload(f_mouv)
                 df_mv = pd.concat([df_base, df_recent], ignore_index=True)
                 df_mv = df_mv.drop_duplicates(subset=['Date', 'ES', 'Document', 'Reference', 'Quantite'])
+                # Fusion + sauvegarde automatique de la base pour les prochaines analyses
+                df_mv.to_pickle(BASE_HISTORIQUE)
+                charger_base_historique.clear()
             else:
                 df_mv = df_base
             sm, date_max, date_12m_debut = calculer_indicateurs(df_mv, f_stock)
@@ -230,11 +250,14 @@ if lancer:
             st.session_state["df_mv"] = df_mv
             st.session_state["date_max"] = date_max
             st.session_state["date_12m_debut"] = date_12m_debut
+        if f_mouv is not None:
+            st.success("Mouvements fusionnés et base historique mise à jour sur le serveur ✅")
 
 sm = st.session_state.get("sm")
 
 if sm is None:
-    st.info("⬅️ Importez vos fichiers dans la barre latérale puis cliquez sur **Générer l'analyse**.")
+    st.info("⬅️ Importez le **stock actuel** (et les mouvements de l'année en cours si disponibles) "
+            "dans la barre latérale, puis cliquez sur **Générer l'analyse**.")
     st.stop()
 
 df_mv = st.session_state["df_mv"]
@@ -242,7 +265,8 @@ date_max = st.session_state["date_max"]
 date_12m_debut = st.session_state["date_12m_debut"]
 
 st.caption(f"Stock au {date_max.strftime('%d/%m/%Y')}  |  Fenêtre 12 mois : "
-           f"{date_12m_debut.strftime('%m/%Y')} → {date_max.strftime('%m/%Y')}")
+           f"{date_12m_debut.strftime('%m/%Y')} → {date_max.strftime('%m/%Y')}  |  "
+           f"{len(df_mv):,} mouvements en base".replace(',', ' '))
 
 # ── Filtres ──────────────────────────────────────────────
 fc1, fc2, fc3 = st.columns([2, 2, 2])
@@ -267,8 +291,6 @@ if recherche:
 vol_m3 = f[f['Unite'] == 'M3']['Stock'].sum()
 rot_moy = f.loc[f['Rotation'] > 0, 'Rotation'].mean()
 n_alertes = len(f[f['Class'].isin(['Rupture', 'Dormant'])])
-n_rupture = len(f[f['Class'] == 'Rupture'])
-n_dormant = len(f[f['Class'] == 'Dormant'])
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Volume Stock (m³)", f"{vol_m3:,.1f}".replace(',', ' '))

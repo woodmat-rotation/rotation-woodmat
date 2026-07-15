@@ -1,6 +1,19 @@
-# WOODMAT — Rotation Stock (Web App)
+# WOODMAT — Rotation du stock (Web App)
+
+## Fichiers du dossier
+- `app.py` — l'application
+- `base_mouvements.pkl` — **la base historique 2020-2025, déjà intégrée** (60 631 mouvements).
+  Ce fichier doit être uploadé sur GitHub **à côté de** `app.py`, à la racine du repo.
+- `requirements.txt`, `secrets_exemple.toml`
 
 ## Ce que fait l'app
+- La base historique 2020-2025 est **intégrée en permanence** — l'utilisateur ne l'importe
+  plus jamais. Elle est chargée automatiquement au démarrage (lecture pickle, quasi instantanée).
+- Chaque analyse ne demande que 2 fichiers : **Stock actuel** (obligatoire, tous les jours) et
+  **Mouvements de l'année en cours** (optionnel — dès qu'un nouvel export 2026 est disponible).
+- Quand un fichier "mouvements année en cours" est importé, il est **fusionné automatiquement**
+  avec la base et la base est **réenregistrée sur le serveur** — la fois suivante, ces mouvements
+  font déjà partie de l'historique, plus besoin de les réimporter.
 - Dashboard large (wide) avec KPIs : Volume stock (m³), rotation moyenne, alertes
 - Filtres par catégorie de bois, classification, recherche référence
 - Graphique évolution des sorties (mensuel) + répartition par classification
@@ -8,6 +21,8 @@
 - Onglet dédié Stock Dormant
 - Export Excel de la vue filtrée
 - Login obligatoire (utilisateur/mot de passe) avant tout accès
+- Performance : parsing vectorisé (pas de boucle ligne par ligne) — supporte 60 000+ lignes
+  de mouvements sans ralentissement notable.
 
 ## Lancer en local (test)
 ```
@@ -42,9 +57,12 @@ via Let's Encrypt) pour un vrai `https://votre-domaine.com`. Dites-le-moi si c'e
 scénario voulu, je prépare le Dockerfile et le nginx.conf.
 
 ## Limites à connaître
-- La base historique importée est stockée sur le serveur de l'app (fichier `.pkl`).
-  Sur Streamlit Community Cloud, ce stockage est **éphémère** : il peut être effacé
-  au redéploiement — il faudra réimporter la base après une mise à jour du code.
+- La base est réenregistrée sur le serveur après fusion des nouveaux mouvements.
+  Sur Streamlit Community Cloud, ce stockage est **éphémère** : un redéploiement (ex: après
+  une mise à jour du code) peut réinitialiser `base_mouvements.pkl` à sa version GitHub —
+  il faudra alors réimporter les mouvements de l'année en cours une fois. Si ça pose problème,
+  on peut faire télécharger automatiquement le `.pkl` mis à jour pour que vous le remplaciez
+  dans le repo GitHub — dites-le-moi si vous voulez cette option.
 - Le login ici est volontairement simple (un mot de passe partagé par utilisateur).
   Pour des comptes individuels avec rôles/permissions, il faut une vraie couche
   d'authentification (ex: Auth0, ou base utilisateurs) — possible à ajouter ensuite.
