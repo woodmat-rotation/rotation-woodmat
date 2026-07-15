@@ -356,16 +356,21 @@ rename_cols = {'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'
                'Dern_Sortie': 'Dern. Sortie'}
 
 
-def style_class(val):
-    color = CLASS_COLORS.get(val, '#FFFFFF')
-    return f'background-color: {color}'
+CLASS_BADGE = {
+    'Excellent': '🟢 Excellent', 'Bon': '🟢 Bon', 'Stock élevé': '🟡 Stock élevé',
+    'Dormant': '🟠 Dormant', 'Rupture': '🔴 Rupture',
+    'Aucun mouvement 12M': '⚪ Aucun mouvement 12M', 'Aucun mouvement': '⚪ Aucun mouvement',
+}
+
+
+def badge_class(series):
+    return series.map(lambda v: CLASS_BADGE.get(v, v))
 
 
 with tab1:
     tdf = f[display_cols].rename(columns=rename_cols).sort_values('Taux Rot. (%)', ascending=False)
-    st.dataframe(
-        tdf.style.applymap(style_class, subset=['Classification']),
-        use_container_width=True, height=480)
+    tdf['Classification'] = badge_class(tdf['Classification'])
+    st.dataframe(tdf, use_container_width=True, height=480)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
@@ -376,6 +381,7 @@ with tab1:
 
 with tab2:
     dorm = f[f['Class'] == 'Dormant'][display_cols].rename(columns=rename_cols)
+    dorm['Classification'] = badge_class(dorm['Classification'])
     st.caption(f"{len(dorm)} référence(s) dormante(s) — plus de mouvement de sortie sur 12 mois glissants "
                f"mais historique de sorties existant.")
     st.dataframe(dorm.sort_values('Immob. (%)', ascending=False),
@@ -408,6 +414,8 @@ with tab3:
     hist_cols = ['Référence', 'Cat', 'Unite', 'Stock', 'Class'] + cols_show
     hist_cols = [c for c in hist_cols if c in f.columns]
     hdf = f[hist_cols].rename(columns={'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
+    if 'Classification' in hdf.columns:
+        hdf['Classification'] = badge_class(hdf['Classification'])
     st.dataframe(hdf, use_container_width=True, height=480)
 
     buf3 = io.BytesIO()
