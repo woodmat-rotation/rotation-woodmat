@@ -138,12 +138,26 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     mv_s_12m = s_12m_df.groupby('Reference').agg(S_12M=('Qty', 'sum'), T_12M=('Qty', 'count')).reset_index()
     mv_e_12m = e_12m_df.groupby('Reference')['Qty'].sum().rename('A_12M').reset_index()
 
+    # ── Historique par année (S_2020, S_2021 ... / A_2020, A_2021 ...) ──
+    sorties_y = sorties.assign(Annee=sorties['Date'].dt.year)
+    entrees_y = entrees.assign(Annee=entrees['Date'].dt.year)
+    piv_s = sorties_y.groupby(['Reference', 'Annee'])['Qty'].sum().unstack(fill_value=0)
+    piv_t = sorties_y.groupby(['Reference', 'Annee'])['Qty'].count().unstack(fill_value=0)
+    piv_a = entrees_y.groupby(['Reference', 'Annee'])['Qty'].sum().unstack(fill_value=0)
+    piv_s.columns = [f'S_{int(y)}' for y in piv_s.columns]
+    piv_t.columns = [f'T_{int(y)}' for y in piv_t.columns]
+    piv_a.columns = [f'A_{int(y)}' for y in piv_a.columns]
+    cols_annuelles = sorted(set(piv_s.columns) | set(piv_a.columns) | set(piv_t.columns))
+
     sm = df_st_c.copy()
     sm = sm.merge(mv_s_all, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
     sm = sm.merge(mv_e_all, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
     sm = sm.merge(mv_s_12m, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
     sm = sm.merge(mv_e_12m, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
-    for c in ['Total_Sorti', 'Nb_Trans', 'S_12M', 'T_12M', 'A_12M']:
+    sm = sm.merge(piv_s, left_on='Référence', right_index=True, how='left')
+    sm = sm.merge(piv_t, left_on='Référence', right_index=True, how='left')
+    sm = sm.merge(piv_a, left_on='Référence', right_index=True, how='left')
+    for c in ['Total_Sorti', 'Nb_Trans', 'S_12M', 'T_12M', 'A_12M'] + cols_annuelles:
         sm[c] = sm[c].fillna(0)
 
     nb_mois_12m = 12.0
@@ -185,15 +199,16 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     sm.loc[conditions_excellent, 'Class'] = 'Excellent'
     sm.loc[conditions_bon, 'Class'] = 'Bon'
 
-    return sm, date_max, date_12m_debut
+    return sm, date_max, date_12m_debut, cols_annuelles
 
 
 def evolution_mensuelle(df_mv, references=None):
     d = df_mv[df_mv['ES'] == 'S']
     if references is not None:
         d = d[d['Reference'].isin(references)]
-    mois = d['Date'].dt.to_period('M').dt.to_timestamp()
-    return d.groupby(mois)['Qty'].sum().reset_index(names='Mois')
+    d = d.copy()
+    d['Mois'] = d['Date'].dt.to_period('M').dt.to_timestamp()
+    return d.groupby('Mois', as_index=False)['Qty'].sum()
 
 
 # ============================================================
@@ -245,11 +260,12 @@ if lancer:
                 charger_base_historique.clear()
             else:
                 df_mv = df_base
-            sm, date_max, date_12m_debut = calculer_indicateurs(df_mv, f_stock)
+            sm, date_max, date_12m_debut, cols_annuelles = calculer_indicateurs(df_mv, f_stock)
             st.session_state["sm"] = sm
             st.session_state["df_mv"] = df_mv
             st.session_state["date_max"] = date_max
             st.session_state["date_12m_debut"] = date_12m_debut
+            st.session_state["cols_annuelles"] = cols_annuelles
         if f_mouv is not None:
             st.success("Mouvements fusionnés et base historique mise à jour sur le serveur ✅")
 
@@ -289,7 +305,11 @@ if recherche:
 
 # ── KPIs ─────────────────────────────────────────────────
 vol_m3 = f[f['Unite'] == 'M3']['Stock'].sum()
-rot_moy = f.loc[f['Rotation'] > 0, 'Rotation'].mean()
+# Rotation globale pondérée = total sorties 12M / total stock (plus robuste que la
+# moyenne simple des ratios individuels, qui explose si une référence a un stock
+# quasi nul avec des sorties non nulles)
+_base_rot = f[f['Rotation'] > 0]
+rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock'].sum() if _base_rot['Stock'].sum() > 0 else float('nan')
 n_alertes = len(f[f['Class'].isin(['Rupture', 'Dormant'])])
 
 k1, k2, k3, k4 = st.columns(4)
@@ -326,7 +346,7 @@ with tcol:
 st.divider()
 
 # ── Tableau dynamique ───────────────────────────────────
-tab1, tab2 = st.tabs(["📋 Tableau complet", "😴 Stock dormant"])
+tab1, tab2, tab3 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", "📅 Historique par année"])
 
 display_cols = ['Référence', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
                  'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
@@ -365,4 +385,34 @@ with tab2:
         dorm.to_excel(writer, index=False, sheet_name='Stock Dormant')
     st.download_button("⬇️ Exporter Stock Dormant", buf2.getvalue(),
                         file_name=f"stock_dormant_{date_max.strftime('%d_%m_%Y')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+with tab3:
+    cols_annuelles = st.session_state.get("cols_annuelles", [])
+    s_cols = sorted([c for c in cols_annuelles if c.startswith('S_')])
+    a_cols = sorted([c for c in cols_annuelles if c.startswith('A_')])
+    t_cols = sorted([c for c in cols_annuelles if c.startswith('T_')])
+
+    st.caption("Détail des sorties (S), achats/entrées (A) et nombre de transactions (T) "
+               "par référence, année par année — même filtres que le tableau principal.")
+
+    vue = st.radio("Vue", ["Sorties par année", "Achats/Entrées par année", "Nb transactions par année"],
+                    horizontal=True)
+    if vue == "Sorties par année":
+        cols_show = s_cols
+    elif vue == "Achats/Entrées par année":
+        cols_show = a_cols
+    else:
+        cols_show = t_cols
+
+    hist_cols = ['Référence', 'Cat', 'Unite', 'Stock', 'Class'] + cols_show
+    hist_cols = [c for c in hist_cols if c in f.columns]
+    hdf = f[hist_cols].rename(columns={'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
+    st.dataframe(hdf, use_container_width=True, height=480)
+
+    buf3 = io.BytesIO()
+    with pd.ExcelWriter(buf3, engine='openpyxl') as writer:
+        hdf.to_excel(writer, index=False, sheet_name='Historique par annee')
+    st.download_button("⬇️ Exporter cette vue", buf3.getvalue(),
+                        file_name=f"historique_annuel_{date_max.strftime('%d_%m_%Y')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
