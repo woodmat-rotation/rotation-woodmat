@@ -212,6 +212,222 @@ def evolution_mensuelle(df_mv, references=None):
 
 
 # ============================================================
+# FEUILLE STOCK BOIS ROUGE (Qualité × Fournisseur × Dimension)
+# ENSO et STORA ENSO sont le même fournisseur → fusionnés en une seule colonne
+# ============================================================
+
+import re as _re
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+BR_QUAL = ['US', 'V', 'VI', 'VII', 'SCHAAL']
+BR_MAIN = ['UPM', 'STORA ENSO', 'KAJA', 'WISA', 'KAUKAS', 'HASA', 'KEITELE', 'JULA']
+BR_QCOL = {
+    'US': ('1F4E79', 'AED6F1'), 'V': ('196F3D', 'A9DFBF'), 'VI': ('6C3483', 'D7BDE2'),
+    'VII': ('B7410E', 'F5CBA7'), 'SCHAAL': ('17594A', 'A2D9CE'),
+}
+BR_TITLE, BR_TOT, BR_SUB, BR_GRAND = '5C2D0A', '8B4513', 'D5B49A', 'A0522D'
+BR_DIM1, BR_DIM2 = 'FDF0E8', 'FFFFFF'
+
+
+def _br_extract_qual(ref):
+    for q in ['SCHAAL', 'VII', 'VI', 'V', 'US']:
+        if _re.search(r'[\s_]' + q + r'$', str(ref)):
+            return q
+    return None
+
+
+def _br_extract_four(ref):
+    ref2 = _re.sub(r'^BOIS\s+ROUGE\s+', '', str(ref).upper().strip())
+    # ENSO et STORA ENSO fusionnés — même fournisseur
+    for f, canon in [('STORA ENSO', 'STORA ENSO'), ('STORA', 'STORA ENSO'), ('ENSO', 'STORA ENSO'),
+                      ('KAUKAS', 'KAUKAS'), ('WISA', 'WISA'), ('KAJA', 'KAJA'), ('UPM', 'UPM'),
+                      ('JULA', 'JULA'), ('HASA', 'HASA'), ('KEITELE', 'KEITELE')]:
+        if ref2.startswith(f):
+            return canon
+    return None
+
+
+def _br_extract_dim(ref, texte5=None):
+    ref2 = _re.sub(r'\s*[Xx]\s*', 'X', str(ref).upper())
+    m = _re.search(r'(\d{2,3}X\d{2,3})', ref2)
+    if m:
+        return m.group(1)
+    if texte5 is not None and pd.notna(texte5):
+        return _re.sub(r'\s*[Xx]\s*', 'X', str(texte5).strip().upper())
+    return 'INCONNU'
+
+
+def _br_dim_key(d):
+    p = _re.findall(r'\d+', d)
+    return [int(x) for x in p] if p else [0]
+
+
+def generer_excel_bois_rouge(df_st_raw, date_max):
+    """Reconstruit la feuille Stock Bois Rouge (style identique à l'ancien outil desktop),
+    avec ENSO et STORA ENSO fusionnés en un seul fournisseur."""
+    df_br = df_st_raw[df_st_raw['Catégorie'] == 'BOIS ROUGE'].copy()
+    df_br['Quantité'] = parse_qty_series(df_br['Quantité'])
+    df_br['_qual'] = df_br['Référence'].apply(_br_extract_qual)
+    df_br['_four'] = df_br['Référence'].apply(_br_extract_four)
+    if 'Texte 5' in df_br.columns:
+        df_br['_dim'] = df_br.apply(lambda r: _br_extract_dim(r['Référence'], r.get('Texte 5')), axis=1)
+    else:
+        df_br['_dim'] = df_br['Référence'].apply(lambda r: _br_extract_dim(r))
+
+    non_reconnus = df_br[(df_br['Quantité'] > 0) & df_br['_qual'].notna() & df_br['_four'].isna()]
+    df_br = df_br[(df_br['Quantité'] > 0) & df_br['_qual'].notna() & df_br['_four'].notna()].copy()
+
+    if df_br.empty:
+        return None, non_reconnus
+
+    br_qf = {}
+    for q in BR_QUAL:
+        present = df_br[df_br['_qual'] == q]['_four'].unique()
+        br_qf[q] = [f for f in BR_MAIN if f in present] + sorted([f for f in present if f not in BR_MAIN])
+
+    br_dims = sorted(df_br['_dim'].unique(), key=_br_dim_key)
+    br_pivot = df_br.pivot_table(index='_dim', columns=['_qual', '_four'], values='Quantité',
+                                  aggfunc='sum', fill_value=0).reindex(br_dims)
+
+    def gv(dim, q, fr):
+        try:
+            k = (q, fr)
+            if k in br_pivot.columns:
+                v = br_pivot.loc[dim, k]
+                return float(v) if pd.notna(v) else 0.0
+        except Exception:
+            pass
+        return 0.0
+
+    br_flat = []
+    for q in BR_QUAL:
+        for fr in br_qf[q]:
+            br_flat.append((q, fr, 'data'))
+        br_flat.append((q, 'TOTAL', 'subtotal'))
+    br_flat.append(('', 'TOTAL', 'grandtotal'))
+
+    def mf(h):
+        return PatternFill("solid", fgColor=h)
+    thin = Side(style='thin', color='BBBBBB')
+    brd = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet(title="Stock BOIS ROUGE")
+    ws.sheet_view.showGridLines = False
+    n_cols = len(br_flat)
+    dt = date_max.strftime('%d/%m/%Y')
+
+    ws.row_dimensions[1].height = 30
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=1 + n_cols)
+    c = ws.cell(1, 1, f"WOODMAT  —  STOCK BOIS ROUGE  |  {dt}")
+    c.font = Font(name='Arial', bold=True, size=13, color='FFFFFF')
+    c.fill = mf(BR_TITLE)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+
+    ws.row_dimensions[2].height = 20
+    ws.cell(2, 1, '').fill = mf(BR_TITLE)
+    cc = 2
+    for q in BR_QUAL:
+        n = len(br_qf[q]) + 1
+        ws.merge_cells(start_row=2, start_column=cc, end_row=2, end_column=cc + n - 1)
+        c = ws.cell(2, cc, q)
+        c.font = Font(name='Arial', bold=True, size=11, color='FFFFFF')
+        c.fill = mf(BR_QCOL[q][0])
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        cc += n
+    c = ws.cell(2, cc, 'TOTAL')
+    c.font = Font(name='Arial', bold=True, size=11, color='FFFFFF')
+    c.fill = mf(BR_TOT)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+
+    ws.row_dimensions[3].height = 20
+    c = ws.cell(3, 1, 'DIMENSION')
+    c.font = Font(name='Arial', bold=True, size=10, color='FFFFFF')
+    c.fill = mf(BR_TITLE)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+    c.border = brd
+    ws.column_dimensions['A'].width = 13
+
+    for ci, (q, fr, ctype) in enumerate(br_flat):
+        col = 2 + ci
+        bg = BR_TOT if ctype == 'grandtotal' else (BR_QCOL[q][0] if ctype == 'subtotal' else BR_QCOL[q][1])
+        fg = 'FFFFFF' if ctype != 'data' else '1A1A1A'
+        c = ws.cell(3, col, fr)
+        c.font = Font(name='Arial', bold=(ctype != 'data'), size=8, color=fg)
+        c.fill = mf(bg)
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        c.border = brd
+        ws.column_dimensions[get_column_letter(col)].width = 8 if ctype == 'data' else 10
+
+    for ri, dim in enumerate(br_dims):
+        row = ri + 4
+        ws.row_dimensions[row].height = 15
+        dim_bg = BR_DIM1 if ri % 2 == 0 else BR_DIM2
+        c = ws.cell(row, 1, dim)
+        c.font = Font(name='Arial', size=9, color='3B1500')
+        c.fill = mf(dim_bg)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        c.border = brd
+
+        row_grand = 0.0
+        for ci, (q, fr, ctype) in enumerate(br_flat):
+            col = 2 + ci
+            if ctype == 'data':
+                val = gv(dim, q, fr)
+            elif ctype == 'subtotal':
+                val = sum(gv(dim, q, ff) for ff in br_qf[q])
+                row_grand += val
+            else:
+                val = row_grand
+            c = ws.cell(row, col)
+            if val < 0.0005:
+                c.value = None
+                c.fill = mf('F2F2F2' if ctype == 'data' else ('E0D0C4' if ctype == 'subtotal' else 'E8CEB8'))
+            else:
+                c.value = round(val, 3)
+                c.number_format = '#,##0.000'
+                c.fill = mf(BR_GRAND if ctype == 'grandtotal' else (BR_SUB if ctype == 'subtotal' else dim_bg))
+            c.font = Font(name='Arial', bold=(ctype != 'data'), size=9,
+                          color=('FFFFFF' if ctype == 'grandtotal' else ('5C2D0A' if ctype == 'subtotal' else '3B1500')))
+            c.alignment = Alignment(horizontal='right', vertical='center')
+            c.border = brd
+
+    tot_row = len(br_dims) + 4
+    ws.row_dimensions[tot_row].height = 18
+    c = ws.cell(tot_row, 1, 'TOTAL')
+    c.font = Font(name='Arial', bold=True, size=10, color='FFFFFF')
+    c.fill = mf(BR_TOT)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+    c.border = brd
+
+    grand_col_total = 0.0
+    for ci, (q, fr, ctype) in enumerate(br_flat):
+        col = 2 + ci
+        if ctype == 'data':
+            col_sum = sum(gv(dim, q, fr) for dim in br_dims)
+        elif ctype == 'subtotal':
+            col_sum = sum(sum(gv(dim, q, ff) for ff in br_qf[q]) for dim in br_dims)
+            grand_col_total += col_sum
+        else:
+            col_sum = grand_col_total
+        c = ws.cell(tot_row, col)
+        c.value = round(col_sum, 3) if col_sum > 0.0005 else None
+        c.number_format = '#,##0.000'
+        c.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+        c.fill = mf(BR_TOT)
+        c.alignment = Alignment(horizontal='right', vertical='center')
+        c.border = brd
+
+    ws.freeze_panes = 'B4'
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), non_reconnus
+
+
+# ============================================================
 # INTERFACE
 # ============================================================
 
@@ -261,11 +477,14 @@ if lancer:
             else:
                 df_mv = df_base
             sm, date_max, date_12m_debut, cols_annuelles = calculer_indicateurs(df_mv, f_stock)
+            f_stock.seek(0)
+            df_st_raw = pd.read_excel(f_stock)
             st.session_state["sm"] = sm
             st.session_state["df_mv"] = df_mv
             st.session_state["date_max"] = date_max
             st.session_state["date_12m_debut"] = date_12m_debut
             st.session_state["cols_annuelles"] = cols_annuelles
+            st.session_state["df_st_raw"] = df_st_raw
         if f_mouv is not None:
             st.success("Mouvements fusionnés et base historique mise à jour sur le serveur ✅")
 
@@ -346,7 +565,8 @@ with tcol:
 st.divider()
 
 # ── Tableau dynamique ───────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", "📅 Historique par année"])
+tab1, tab2, tab3, tab4 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", "📅 Historique par année",
+                                    "🪵 Stock Bois Rouge"])
 
 display_cols = ['Référence', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
                  'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
@@ -424,3 +644,24 @@ with tab3:
     st.download_button("⬇️ Exporter cette vue", buf3.getvalue(),
                         file_name=f"historique_annuel_{date_max.strftime('%d_%m_%Y')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+with tab4:
+    df_st_raw = st.session_state.get("df_st_raw")
+    if df_st_raw is None or 'Catégorie' not in df_st_raw.columns:
+        st.info("Générez d'abord l'analyse (fichier stock actuel) pour voir cet onglet.")
+    else:
+        st.caption("Stock BOIS ROUGE par Qualité × Fournisseur × Dimension — même mise en forme "
+                   "que l'ancien fichier Excel. **ENSO** et **STORA ENSO** sont fusionnés (même fournisseur).")
+        br_bytes, non_reconnus = generer_excel_bois_rouge(df_st_raw, date_max)
+        if br_bytes is None:
+            st.warning("Aucune référence BOIS ROUGE exploitable trouvée dans le stock actuel.")
+        else:
+            if len(non_reconnus) > 0:
+                total_absent = non_reconnus['Quantité'].sum() if 'Quantité' in non_reconnus.columns else 0
+                st.warning(f"⚠️ {len(non_reconnus)} référence(s) BOIS ROUGE avec un fournisseur non "
+                           f"reconnu ({total_absent:.3f} M3) ne figurent pas dans le tableau ci-dessous. "
+                           f"Dites-moi les noms de fournisseurs manquants et je les ajoute.")
+            st.download_button("⬇️ Télécharger la feuille Stock Bois Rouge (Excel)", br_bytes,
+                                file_name=f"stock_bois_rouge_{date_max.strftime('%d_%m_%Y')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                type="primary")
