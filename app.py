@@ -110,16 +110,27 @@ def charger_base_historique():
 @st.cache_data(show_spinner=False)
 def calculer_indicateurs(df_mv, df_st_bytes):
     df_st = pd.read_excel(df_st_bytes)
-    _unite_col = next(
-        (c for c in df_st.columns if str(c).strip().upper().startswith('UNIT') and 'V' in str(c).upper()),
-        None)
-    if _unite_col and _unite_col != 'Unité V.':
-        df_st.rename(columns={_unite_col: 'Unité V.'}, inplace=True)
+    # L'unité fiable est celle d'ACHAT ("Unité P.") — l'unité de VENTE ("Unité V.") contient
+    # des erreurs de saisie ponctuelles (ex: une référence en M2 étiquetée "P" à la vente).
+    _unite_col = next((c for c in df_st.columns if str(c).strip().upper() == 'UNITÉ P.'), None)
+    if _unite_col is None:
+        _unite_col = next(
+            (c for c in df_st.columns if str(c).strip().upper().startswith('UNIT') and 'P' in str(c).upper()),
+            None)
+    if _unite_col is None:
+        _unite_col = next(
+            (c for c in df_st.columns if str(c).strip().upper().startswith('UNIT') and 'V' in str(c).upper()),
+            None)
+    if _unite_col and _unite_col != 'Unité':
+        df_st.rename(columns={_unite_col: 'Unité'}, inplace=True)
     elif _unite_col is None:
-        df_st['Unité V.'] = 'M3'
+        df_st['Unité'] = 'M3'
+    if 'Désignation' not in df_st.columns:
+        df_st['Désignation'] = ''
     df_st['Qty_s'] = parse_qty_series(df_st['Quantité'])
     df_st_c = df_st.groupby('Référence').agg(
-        Stock=('Qty_s', 'sum'), Cat=('Catégorie', 'first'), Unite=('Unité V.', 'first')).reset_index()
+        Stock=('Qty_s', 'sum'), Cat=('Catégorie', 'first'), Unite=('Unité', 'first'),
+        Designation=('Désignation', 'first')).reset_index()
     df_st_c = df_st_c[df_st_c['Cat'].notna()]
     df_st_c.loc[df_st_c['Cat'].isin(['BOIS BLANC', 'BOIS ROUGE']), 'Unite'] = 'M3'
 
@@ -513,7 +524,7 @@ with fc2:
     classes = sorted(sm['Class'].unique())
     sel_class = st.multiselect("Classification", classes, default=[])
 with fc3:
-    recherche = st.text_input("🔍 Recherche référence")
+    recherche = st.text_input("🔍 Recherche référence ou désignation")
 
 f = sm.copy()
 if sel_cats:
@@ -521,7 +532,8 @@ if sel_cats:
 if sel_class:
     f = f[f['Class'].isin(sel_class)]
 if recherche:
-    f = f[f['Référence'].astype(str).str.contains(recherche, case=False, na=False)]
+    f = f[f['Référence'].astype(str).str.contains(recherche, case=False, na=False)
+          | f['Designation'].astype(str).str.contains(recherche, case=False, na=False)]
 
 # ── KPIs ─────────────────────────────────────────────────
 vol_m3 = f[f['Unite'] == 'M3']['Stock'].sum()
@@ -569,9 +581,9 @@ st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", "📅 Historique par année",
                                     "🪵 Stock Bois Rouge"])
 
-display_cols = ['Référence', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
+display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
                  'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
-rename_cols = {'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
+rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
                'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Taux_Rot': 'Taux Rot. (%)',
                'Couverture': 'Couv. (mois)', 'Delai': 'Délai (j)', 'Taux_Immob': 'Immob. (%)',
                'Dern_Sortie': 'Dern. Sortie'}
@@ -632,9 +644,9 @@ with tab3:
     else:
         cols_show = t_cols
 
-    hist_cols = ['Référence', 'Cat', 'Unite', 'Stock', 'Class'] + cols_show
+    hist_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class'] + cols_show
     hist_cols = [c for c in hist_cols if c in f.columns]
-    hdf = f[hist_cols].rename(columns={'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
+    hdf = f[hist_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
     if 'Classification' in hdf.columns:
         hdf['Classification'] = badge_class(hdf['Classification'])
     st.dataframe(hdf, use_container_width=True, height=480)
