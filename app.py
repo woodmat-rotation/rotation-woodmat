@@ -323,7 +323,7 @@ def generer_excel_bois_rouge(df_st_raw, date_max):
 
     ws.row_dimensions[1].height = 30
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=1 + n_cols)
-    c = ws.cell(1, 1, f"WOODMAT  —  STOCK BOIS ROUGE  |  {dt}")
+    c = ws.cell(1, 1, f"WOODMAT  —  STOCK BOIS ROUGE + BOIS BLANC SUEDE (ENSO)  —  Quantités en M³  |  {dt}")
     c.font = Font(name='Arial', bold=True, size=13, color='FFFFFF')
     c.fill = mf(BR_TITLE)
     c.alignment = Alignment(horizontal='center', vertical='center')
