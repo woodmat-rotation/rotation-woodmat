@@ -267,7 +267,8 @@ def _br_dim_key(d):
 def generer_excel_bois_rouge(df_st_raw, date_max):
     """Reconstruit la feuille Stock Bois Rouge (style identique à l'ancien outil desktop),
     avec ENSO et STORA ENSO fusionnés en un seul fournisseur."""
-    df_br = df_st_raw[df_st_raw['Catégorie'] == 'BOIS ROUGE'].copy()
+    # BOIS ROUGE + BOIS BLANC SUEDE (même famille ENSO/STORA ENSO) réunis dans le même tableau
+    df_br = df_st_raw[df_st_raw['Catégorie'].isin(['BOIS ROUGE', 'BOIS BLANC SUEDE'])].copy()
     df_br['Quantité'] = parse_qty_series(df_br['Quantité'])
     df_br['_qual'] = df_br['Référence'].apply(_br_extract_qual)
     df_br['_four'] = df_br['Référence'].apply(_br_extract_four)
@@ -650,7 +651,8 @@ with tab4:
     if df_st_raw is None or 'Catégorie' not in df_st_raw.columns:
         st.info("Générez d'abord l'analyse (fichier stock actuel) pour voir cet onglet.")
     else:
-        st.caption("Stock BOIS ROUGE par Qualité × Fournisseur × Dimension — même mise en forme "
+        st.caption("Stock BOIS ROUGE + BOIS BLANC SUEDE (même famille ENSO/STORA ENSO) par Qualité × "
+                   "Fournisseur × Dimension — même mise en forme "
                    "que l'ancien fichier Excel. **ENSO** et **STORA ENSO** sont fusionnés (même fournisseur).")
         br_bytes, non_reconnus = generer_excel_bois_rouge(df_st_raw, date_max)
         if br_bytes is None:
