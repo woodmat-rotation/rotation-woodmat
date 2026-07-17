@@ -213,6 +213,24 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     return sm, date_max, date_12m_debut, cols_annuelles
 
 
+
+
+def format_nombre_fr(value, decimals=2):
+    """Formatage sobre des nombres pour l'affichage des indicateurs."""
+    if pd.isna(value):
+        return "—"
+    return f"{value:,.{decimals}f}".replace(',', ' ')
+
+
+def format_unite_stock(unite):
+    """Libellé court des unités affichées dans les KPI, sans modifier les calculs."""
+    u = str(unite).strip().upper()
+    return {
+        'M3': 'm³', 'M³': 'm³', 'M2': 'm²', 'M²': 'm²',
+        'P': 'P', 'PC': 'P', 'PCS': 'P', 'PIECE': 'P', 'PIÈCE': 'P',
+        'ML': 'ML', 'M/L': 'ML', 'M.L': 'ML',
+    }.get(u, u or 'Unité')
+
 def evolution_mensuelle(df_mv, references=None):
     d = df_mv[df_mv['ES'] == 'S']
     if references is not None:
@@ -467,7 +485,57 @@ with st.sidebar:
 
     lancer = st.button("🔄 Générer l'analyse", type="primary", use_container_width=True)
 
-st.markdown("<h2 style='color:#1F3864;margin-bottom:0'>WOODMAT — Rotation du stock</h2>", unsafe_allow_html=True)
+st.markdown(
+    """
+    <style>
+    .woodmat-kpi-card {
+        background: #FFFFFF;
+        border: 1px solid rgba(31, 56, 100, 0.14);
+        border-radius: 10px;
+        padding: 1rem 1.1rem;
+        min-height: 150px;
+        box-shadow: 0 1px 3px rgba(31, 56, 100, 0.06);
+    }
+    .woodmat-kpi-title {
+        color: #1F3864;
+        font-size: 0.95rem;
+        font-weight: 700;
+        margin-bottom: 0.45rem;
+    }
+    .woodmat-kpi-value {
+        color: #202A35;
+        font-size: 1.55rem;
+        font-weight: 700;
+        line-height: 1.35;
+    }
+    .woodmat-kpi-detail {
+        color: #555;
+        font-size: 0.95rem;
+        line-height: 1.45;
+        margin-top: 0.15rem;
+    }
+    .woodmat-muted {
+        color: #777;
+        font-size: 0.88rem;
+        line-height: 1.35;
+        margin-top: 0.35rem;
+    }
+    .woodmat-section-title {
+        color: #1F3864;
+        font-size: 1.08rem;
+        font-weight: 700;
+        margin-bottom: 0.1rem;
+    }
+    .woodmat-legend {
+        color: #666;
+        font-size: 0.86rem;
+        line-height: 1.45;
+        margin-top: 0.35rem;
+    }
+    </style>
+    <h2 style='color:#1F3864;margin-bottom:0'>WOODMAT — Rotation du stock</h2>
+    """,
+    unsafe_allow_html=True)
 st.caption("Dashboard interactif — indicateurs calculés sur une fenêtre glissante de 12 mois")
 
 if "sm" not in st.session_state:
@@ -511,9 +579,11 @@ df_mv = st.session_state["df_mv"]
 date_max = st.session_state["date_max"]
 date_12m_debut = st.session_state["date_12m_debut"]
 
-st.caption(f"Stock au {date_max.strftime('%d/%m/%Y')}  |  Fenêtre 12 mois : "
-           f"{date_12m_debut.strftime('%m/%Y')} → {date_max.strftime('%m/%Y')}  |  "
-           f"{len(df_mv):,} mouvements en base".replace(',', ' '))
+st.caption(
+    f"Analyse réalisée le : {date_max.strftime('%d/%m/%Y')}  |  "
+    f"Fenêtre d'analyse : 12 derniers mois  |  "
+    f"Mouvements analysés : {len(df_mv):,}".replace(',', ' ')
+)
 
 # ── Filtres ──────────────────────────────────────────────
 fc1, fc2, fc3 = st.columns([2, 2, 2])
@@ -536,26 +606,58 @@ if recherche:
           | f['Designation'].astype(str).str.contains(recherche, case=False, na=False)]
 
 # ── KPIs ─────────────────────────────────────────────────
-vol_m3 = f[f['Unite'] == 'M3']['Stock'].sum()
+stock_par_unite = (
+    f.assign(Unite_Affichage=f['Unite'].apply(format_unite_stock))
+     .groupby('Unite_Affichage', as_index=False)['Stock']
+     .sum()
+)
+unite_order = {'m³': 0, 'm²': 1, 'P': 2, 'ML': 3}
+stock_par_unite['_Ordre'] = stock_par_unite['Unite_Affichage'].map(unite_order).fillna(99)
+stock_par_unite = stock_par_unite.sort_values(['_Ordre', 'Unite_Affichage'])
+volume_stock_html = "<br>".join(
+    f"{format_nombre_fr(row.Stock)} {row.Unite_Affichage}"
+    for row in stock_par_unite.itertuples(index=False)
+) or "—"
 # Rotation globale pondérée = total sorties 12M / total stock (plus robuste que la
 # moyenne simple des ratios individuels, qui explose si une référence a un stock
 # quasi nul avec des sorties non nulles)
 _base_rot = f[f['Rotation'] > 0]
 rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock'].sum() if _base_rot['Stock'].sum() > 0 else float('nan')
-n_alertes = len(f[f['Class'].isin(['Rupture', 'Dormant'])])
+n_rupture = len(f[f['Class'] == 'Rupture'])
+n_dormant = len(f[f['Class'] == 'Dormant'])
+n_alertes = n_rupture + n_dormant
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Volume Stock (m³)", f"{vol_m3:,.1f}".replace(',', ' '))
-k2.metric("Rotation moyenne (12M)", f"{rot_moy:.2f}" if pd.notna(rot_moy) else "—")
-k3.metric("⚠️ Alertes (Rupture + Dormant)", n_alertes)
-k4.metric("Articles analysés", len(f))
+with k1:
+    st.markdown(
+        f"<div class='woodmat-kpi-card'><div class='woodmat-kpi-title'>Volume Stock</div>"
+        f"<div class='woodmat-kpi-value'>{volume_stock_html}</div></div>",
+        unsafe_allow_html=True)
+with k2:
+    st.metric(
+        "Rotation du stock",
+        f"{rot_moy:.2f} tours/an" if pd.notna(rot_moy) else "—",
+        help="Nombre moyen de renouvellements du stock sur les 12 derniers mois.")
+    st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois</div>", unsafe_allow_html=True)
+with k3:
+    st.metric(
+        "⚠️ Alertes",
+        "Articles nécessitant une action",
+        help="Les alertes regroupent les articles en rupture de stock ainsi que les articles sans mouvement depuis plus de 12 mois.")
+    st.markdown(
+        f"<div class='woodmat-kpi-detail'>Rupture : {n_rupture}<br>"
+        f"Dormant : {n_dormant}<br><strong>Total : {n_alertes}</strong></div>",
+        unsafe_allow_html=True)
+with k4:
+    st.metric("Articles analysés (références)", len(f))
 
 st.divider()
 
 # ── Graphique évolution des ventes ──────────────────────
 gcol, tcol = st.columns([1.3, 1])
 with gcol:
-    st.markdown("#### Évolution des sorties (mensuel)")
+    st.markdown("<div class='woodmat-section-title'>Historique des sorties mensuelles</div>", unsafe_allow_html=True)
+    st.markdown("<div class='woodmat-muted'>Quantités sorties par mois sur les 12 derniers mois.</div>", unsafe_allow_html=True)
     refs_filtrees = f['Référence'].tolist() if (sel_cats or sel_class or recherche) else None
     evo = evolution_mensuelle(df_mv, refs_filtrees)
     fig = go.Figure()
@@ -563,17 +665,30 @@ with gcol:
                               line=dict(color='#1F3864', width=2), fill='tozeroy',
                               fillcolor='rgba(31,56,100,0.1)'))
     fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                       xaxis_title=None, yaxis_title="Qté sortie")
+                       xaxis_title=None, yaxis_title="Quantité sortie")
     st.plotly_chart(fig, use_container_width=True)
 
 with tcol:
-    st.markdown("#### Répartition par classification")
+    st.markdown("<div class='woodmat-section-title'>Répartition des articles par niveau de rotation</div>", unsafe_allow_html=True)
     dist = f['Class'].value_counts().reset_index()
     dist.columns = ['Classification', 'Nb']
     fig2 = px.pie(dist, names='Classification', values='Nb', hole=0.45,
                   color='Classification', color_discrete_map=CLASS_COLORS)
     fig2.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), showlegend=True)
     st.plotly_chart(fig2, use_container_width=True)
+    st.markdown("<div class='woodmat-muted'>Classification calculée selon la rotation observée sur les 12 derniers mois.</div>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class='woodmat-legend'>
+        <strong>Excellent</strong> → Rotation très élevée.<br>
+        <strong>Bon</strong> → Rotation satisfaisante.<br>
+        <strong>Stock élevé</strong> → Stock supérieur au besoin.<br>
+        <strong>Dormant</strong> → Aucun mouvement depuis plus de 12 mois.<br>
+        <strong>Rupture</strong> → Stock nul.<br>
+        <strong>Aucun mouvement 12M</strong> → Aucune sortie enregistrée durant les 12 derniers mois.
+        </div>
+        """,
+        unsafe_allow_html=True)
 
 st.divider()
 
