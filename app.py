@@ -114,6 +114,8 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     # des erreurs de saisie ponctuelles (ex: une référence en M2 étiquetée "P" à la vente).
     _unite_col = next((c for c in df_st.columns if str(c).strip().upper() == 'UNITÉ P.'), None)
     if _unite_col is None:
+        _unite_col = next((c for c in df_st.columns if str(c).strip().upper() == 'UNITÉ'), None)
+    if _unite_col is None:
         _unite_col = next(
             (c for c in df_st.columns if str(c).strip().upper().startswith('UNIT') and 'P' in str(c).upper()),
             None)
@@ -127,10 +129,22 @@ def calculer_indicateurs(df_mv, df_st_bytes):
         df_st['Unité'] = 'M3'
     if 'Désignation' not in df_st.columns:
         df_st['Désignation'] = ''
-    df_st['Qty_s'] = parse_qty_series(df_st['Quantité'])
-    df_st_c = df_st.groupby('Référence').agg(
-        Stock=('Qty_s', 'sum'), Cat=('Catégorie', 'first'), Unite=('Unité', 'first'),
-        Designation=('Désignation', 'first')).reset_index()
+    _qte_col = 'Quantité' if 'Quantité' in df_st.columns else ('Stock' if 'Stock' in df_st.columns else None)
+    df_st['Qty_s'] = parse_qty_series(df_st[_qte_col]) if _qte_col else 0.0
+    # Valeur du stock = Stock × CUMP (coût unitaire moyen pondéré) — calculée en interne
+    # uniquement si la colonne CUMP est présente dans le fichier importé. CUMP lui-même
+    # n'est jamais affiché comme KPI, seule la valeur monétaire l'est.
+    has_cump = 'CUMP' in df_st.columns
+    if has_cump:
+        df_st['CUMP_s'] = parse_qty_series(df_st['CUMP'])
+        df_st['Valeur_s'] = df_st['Qty_s'] * df_st['CUMP_s']
+    agg_dict = {'Stock': ('Qty_s', 'sum'), 'Cat': ('Catégorie', 'first'), 'Unite': ('Unité', 'first'),
+                'Designation': ('Désignation', 'first')}
+    if has_cump:
+        agg_dict['Valeur'] = ('Valeur_s', 'sum')
+    df_st_c = df_st.groupby('Référence').agg(**agg_dict).reset_index()
+    if not has_cump:
+        df_st_c['Valeur'] = 0.0
     df_st_c = df_st_c[df_st_c['Cat'].notna()]
     df_st_c.loc[df_st_c['Cat'].isin(['BOIS BLANC', 'BOIS ROUGE']), 'Unite'] = 'M3'
 
@@ -618,6 +632,7 @@ volume_stock_html = "<br>".join(
     f"{format_nombre_fr(row.Stock)} {row.Unite_Affichage}"
     for row in stock_par_unite.itertuples(index=False)
 ) or "—"
+valeur_stock = f['Valeur'].sum() if 'Valeur' in f.columns else 0.0
 # Rotation globale pondérée = total sorties 12M / total stock (plus robuste que la
 # moyenne simple des ratios individuels, qui explose si une référence a un stock
 # quasi nul avec des sorties non nulles)
@@ -627,19 +642,25 @@ n_rupture = len(f[f['Class'] == 'Rupture'])
 n_dormant = len(f[f['Class'] == 'Dormant'])
 n_alertes = n_rupture + n_dormant
 
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     st.markdown(
         f"<div class='woodmat-kpi-card'><div class='woodmat-kpi-title'>Volume Stock</div>"
         f"<div class='woodmat-kpi-value'>{volume_stock_html}</div></div>",
         unsafe_allow_html=True)
 with k2:
+    st.markdown(
+        f"<div class='woodmat-kpi-card'><div class='woodmat-kpi-title'>Valeur du Stock</div>"
+        f"<div class='woodmat-kpi-value'>{format_nombre_fr(valeur_stock, 0) + ' DH' if valeur_stock > 0 else '—'}</div></div>",
+        unsafe_allow_html=True)
+    st.markdown("<div class='woodmat-muted'>Stock × CUMP (coût unitaire moyen pondéré)</div>", unsafe_allow_html=True)
+with k3:
     st.metric(
         "Rotation du stock",
         f"{rot_moy:.2f} tours/an" if pd.notna(rot_moy) else "—",
         help="Nombre moyen de renouvellements du stock sur les 12 derniers mois.")
     st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois</div>", unsafe_allow_html=True)
-with k3:
+with k4:
     st.metric(
         "⚠️ Alertes",
         "Articles nécessitant une action",
@@ -648,7 +669,7 @@ with k3:
         f"<div class='woodmat-kpi-detail'>Rupture : {n_rupture}<br>"
         f"Dormant : {n_dormant}<br><strong>Total : {n_alertes}</strong></div>",
         unsafe_allow_html=True)
-with k4:
+with k5:
     st.metric("Articles analysés (références)", len(f))
 
 st.divider()
@@ -696,9 +717,9 @@ st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", "📅 Historique par année",
                                     "🪵 Stock Bois Rouge"])
 
-display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
+display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Valeur', 'Class', 'S_12M', 'Moy_Mois',
                  'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
-rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
+rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Valeur': 'Valeur (DH)', 'Class': 'Classification',
                'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Taux_Rot': 'Taux Rot. (%)',
                'Couverture': 'Couv. (mois)', 'Delai': 'Délai (j)', 'Taux_Immob': 'Immob. (%)',
                'Dern_Sortie': 'Dern. Sortie'}
