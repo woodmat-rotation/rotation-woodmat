@@ -4,6 +4,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 import os
 import io
+import json
+import hashlib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -16,6 +18,7 @@ st.set_page_config(page_title="WOODMAT — Rotation du stock", layout="wide",
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_HISTORIQUE = os.path.join(APP_DIR, "base_mouvements.pkl")  # base 2020-2025, livrée avec l'app
+USERS_FILE = os.path.join(APP_DIR, "users.json")
 SEUIL = 0.001
 
 CLASS_COLORS = {
@@ -28,29 +31,171 @@ CLASS_COLORS = {
 # AUTHENTIFICATION
 # ============================================================
 
+def inject_global_styles():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --woodmat-blue: #1F3864;
+            --woodmat-blue-dark: #13233F;
+            --woodmat-gold: #B88A44;
+            --woodmat-bg: #F5F7FB;
+            --woodmat-card: #FFFFFF;
+            --woodmat-border: rgba(31, 56, 100, 0.14);
+        }
+        .stApp { background: var(--woodmat-bg); }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #13233F 0%, #1F3864 100%);
+        }
+        [data-testid="stSidebar"] * { color: #F8FAFC !important; }
+        [data-testid="stSidebar"] .stButton > button, [data-testid="stSidebar"] button {
+            border-radius: 12px;
+        }
+        .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
+        .woodmat-login-shell {
+            max-width: 460px; margin: 7vh auto 0; padding: 2.2rem;
+            background: #FFFFFF; border: 1px solid var(--woodmat-border);
+            border-radius: 22px; box-shadow: 0 20px 60px rgba(19,35,63,0.14);
+        }
+        .woodmat-logo {
+            width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 0.8rem;
+            display: flex; align-items: center; justify-content: center;
+            background: linear-gradient(135deg, var(--woodmat-blue), var(--woodmat-gold));
+            color: white; font-size: 1.8rem; font-weight: 800;
+        }
+        .woodmat-header {
+            position: sticky; top: 0; z-index: 50; margin-bottom: 1.2rem;
+            display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+            padding: 0.85rem 1.1rem; background: rgba(255,255,255,0.95);
+            border: 1px solid var(--woodmat-border); border-radius: 18px;
+            box-shadow: 0 8px 24px rgba(19,35,63,0.07); backdrop-filter: blur(8px);
+        }
+        .woodmat-header-title { color: var(--woodmat-blue); font-weight: 800; font-size: 1.1rem; }
+        .woodmat-header-meta { color: #64748B; font-size: 0.9rem; text-align: right; }
+        .woodmat-page-title { color: var(--woodmat-blue); margin: 0 0 0.25rem; font-weight: 800; }
+        .woodmat-panel, .woodmat-kpi-card {
+            background: var(--woodmat-card); border: 1px solid var(--woodmat-border);
+            border-radius: 18px; padding: 1rem 1.1rem;
+            box-shadow: 0 8px 24px rgba(19,35,63,0.06);
+        }
+        .woodmat-kpi-card { min-height: 150px; }
+        .woodmat-kpi-title { color: var(--woodmat-blue); font-size: 0.95rem; font-weight: 700; margin-bottom: 0.45rem; }
+        .woodmat-kpi-value { color: #202A35; font-size: 1.55rem; font-weight: 800; line-height: 1.35; }
+        .woodmat-kpi-detail { color: #555; font-size: 0.95rem; line-height: 1.45; margin-top: 0.15rem; }
+        .woodmat-muted { color: #64748B; font-size: 0.9rem; line-height: 1.35; margin-top: 0.35rem; }
+        .woodmat-section-title { color: var(--woodmat-blue); font-size: 1.08rem; font-weight: 800; margin-bottom: 0.1rem; }
+        .woodmat-legend { color: #666; font-size: 0.86rem; line-height: 1.45; margin-top: 0.35rem; }
+        .woodmat-coming-soon {
+            border: 1px dashed rgba(31,56,100,0.28); border-radius: 18px; padding: 1.2rem;
+            background: rgba(255,255,255,0.75); color: #475569;
+        }
+        @media (max-width: 768px) { .woodmat-header { flex-direction: column; align-items: flex-start; } .woodmat-header-meta { text-align: left; } }
+        </style>
+        """,
+        unsafe_allow_html=True)
+
+
+
+def hash_password(password):
+    return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
+
+
+def default_users():
+    now = pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')
+    return {
+        "admin@woodmat.local": {
+            "Nom": "Administrateur WOODMAT",
+            "Email": "admin@woodmat.local",
+            "Mot de passe": hash_password("woodmat2026"),
+            "Rôle": "Administrateur",
+            "Date de création": now,
+            "Dernière connexion": "—",
+            "Statut": "Actif",
+        },
+        "direction@woodmat.local": {
+            "Nom": "Direction WOODMAT",
+            "Email": "direction@woodmat.local",
+            "Mot de passe": hash_password("woodmat2026"),
+            "Rôle": "Direction",
+            "Date de création": now,
+            "Dernière connexion": "—",
+            "Statut": "Actif",
+        },
+        "commercial@woodmat.local": {
+            "Nom": "Commercial WOODMAT",
+            "Email": "commercial@woodmat.local",
+            "Mot de passe": hash_password("woodmat2026"),
+            "Rôle": "Commercial",
+            "Date de création": now,
+            "Dernière connexion": "—",
+            "Statut": "Actif",
+        },
+    }
+
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    users = default_users()
+    save_users(users)
+    return users
+
+
+def save_users(users):
+    with open(USERS_FILE, "w", encoding="utf-8") as fh:
+        json.dump(users, fh, ensure_ascii=False, indent=2)
+
+
+def current_user():
+    return st.session_state.get("auth_user_profile", {})
+
+
+def can_manage_users():
+    return current_user().get("Rôle") == "Administrateur"
+
 def check_login():
     if st.session_state.get("auth_ok"):
         return True
 
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 1.2, 1])
+    inject_global_styles()
+    st.markdown(
+        """
+        <div class='woodmat-login-shell'>
+            <div class='woodmat-logo'>W</div>
+            <div style='text-align:center'>
+                <h1 style='color:#1F3864;margin-bottom:0'>WOODMAT</h1>
+                <p style='color:#64748B;margin-top:0.35rem'>Application métier — Rotation du stock</p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1.15, 1])
     with col2:
-        st.markdown(
-            "<div style='text-align:center'><h1 style='color:#1F3864'>WOODMAT</h1>"
-            "<p style='color:#888'>Rotation du stock — Accès sécurisé</p></div>",
-            unsafe_allow_html=True)
         with st.form("login_form"):
-            user = st.text_input("Utilisateur")
+            user = st.text_input("Email", placeholder="admin")
             pwd = st.text_input("Mot de passe", type="password")
             submit = st.form_submit_button("Se connecter", use_container_width=True)
+        st.caption("Mot de passe oublié ? Contactez votre administrateur WOODMAT.")
         if submit:
-            users = st.secrets.get("credentials", {"admin": "woodmat2026"})
-            if user in users and pwd == users[user]:
+            users = load_users()
+            email = user.strip().lower()
+            profile = users.get(email)
+            if (profile and profile.get("Statut") == "Actif"
+                    and profile.get("Mot de passe") == hash_password(pwd)):
+                now = pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')
+                profile["Dernière connexion"] = now
+                users[email] = profile
+                save_users(users)
                 st.session_state["auth_ok"] = True
-                st.session_state["auth_user"] = user
+                st.session_state["auth_user"] = profile.get("Nom", email)
+                st.session_state["auth_user_email"] = email
+                st.session_state["auth_user_profile"] = profile
+                st.session_state["last_login"] = now
+                st.session_state["page"] = "🏠 Dashboard"
                 st.rerun()
             else:
-                st.error("Identifiants incorrects.")
+                st.error("Identifiants incorrects ou compte désactivé.")
     return False
 
 
@@ -469,74 +614,56 @@ if not os.path.exists(BASE_HISTORIQUE):
              "Elle doit être livrée avec l'application — contactez l'administrateur.")
     st.stop()
 
+inject_global_styles()
+
+MENU_ITEMS = [
+    "🏠 Dashboard", "📦 Rotation du stock", "📈 Analyses", "⚠️ Alertes",
+    "📦 Réapprovisionnement", "😴 Stock dormant", "🪵 Stock Bois Rouge",
+    "📄 Rapports", "📚 Historique"
+]
+if can_manage_users():
+    MENU_ITEMS.append("👥 Gestion des utilisateurs")
+
 with st.sidebar:
-    st.markdown(f"### 📦 WOODMAT\n**Connecté :** {st.session_state.get('auth_user','')}")
-    if st.button("Se déconnecter"):
-        st.session_state.clear()
-        st.rerun()
+    st.markdown("### 🪵 WOODMAT")
+    st.caption(f"Connecté : {st.session_state.get('auth_user', '')}")
+    st.divider()
+    if st.session_state.get("page") not in MENU_ITEMS:
+        st.session_state["page"] = MENU_ITEMS[0]
+    page = st.radio("Navigation", MENU_ITEMS, key="page", label_visibility="collapsed")
     st.divider()
     st.caption("La base historique 2020–2025 est intégrée à l'application — rien à importer.")
 
-    st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
-    f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
+    f_mouv = None
+    f_stock = None
+    lancer = False
+    if page in ["🏠 Dashboard", "📦 Rotation du stock"]:
+        st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
+        f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
 
-    st.markdown("**2. Stock actuel** _(obligatoire, export du jour)_")
-    f_stock = st.file_uploader("Export ERP stock actuel", type=["xlsx", "xls"], key="stock")
+        st.markdown("**2. Stock actuel** _(obligatoire, export du jour)_")
+        f_stock = st.file_uploader("Export ERP stock actuel", type=["xlsx", "xls"], key="stock")
 
-    lancer = st.button("🔄 Générer l'analyse", type="primary", use_container_width=True)
+        lancer = st.button("🔄 Générer l'analyse", type="primary", use_container_width=True)
 
+profile = current_user()
+user = profile.get('Nom', st.session_state.get('auth_user', ''))
+role = profile.get('Rôle', '—')
+today = pd.Timestamp.now().strftime('%d/%m/%Y')
 st.markdown(
-    """
-    <style>
-    .woodmat-kpi-card {
-        background: #FFFFFF;
-        border: 1px solid rgba(31, 56, 100, 0.14);
-        border-radius: 10px;
-        padding: 1rem 1.1rem;
-        min-height: 150px;
-        box-shadow: 0 1px 3px rgba(31, 56, 100, 0.06);
-    }
-    .woodmat-kpi-title {
-        color: #1F3864;
-        font-size: 0.95rem;
-        font-weight: 700;
-        margin-bottom: 0.45rem;
-    }
-    .woodmat-kpi-value {
-        color: #202A35;
-        font-size: 1.55rem;
-        font-weight: 700;
-        line-height: 1.35;
-    }
-    .woodmat-kpi-detail {
-        color: #555;
-        font-size: 0.95rem;
-        line-height: 1.45;
-        margin-top: 0.15rem;
-    }
-    .woodmat-muted {
-        color: #777;
-        font-size: 0.88rem;
-        line-height: 1.35;
-        margin-top: 0.35rem;
-    }
-    .woodmat-section-title {
-        color: #1F3864;
-        font-size: 1.08rem;
-        font-weight: 700;
-        margin-bottom: 0.1rem;
-    }
-    .woodmat-legend {
-        color: #666;
-        font-size: 0.86rem;
-        line-height: 1.45;
-        margin-top: 0.35rem;
-    }
-    </style>
-    <h2 style='color:#1F3864;margin-bottom:0'>WOODMAT — Rotation du stock</h2>
+    f"""
+    <div class='woodmat-header'>
+        <div style='display:flex;align-items:center;gap:0.75rem'>
+            <div class='woodmat-logo' style='width:42px;height:42px;border-radius:13px;font-size:1.2rem;margin:0'>W</div>
+            <div><div class='woodmat-header-title'>WOODMAT — Rotation du stock</div><div class='woodmat-muted'>Application métier</div></div>
+        </div>
+        <div class='woodmat-header-meta'>📅 {today}<br>👤 {user}<br>🔐 {role}</div>
+    </div>
     """,
     unsafe_allow_html=True)
-st.caption("Dashboard interactif — indicateurs calculés sur une fenêtre glissante de 12 mois")
+if st.button("Déconnexion", key="logout_header"):
+    st.session_state.clear()
+    st.rerun()
 
 if "sm" not in st.session_state:
     st.session_state["sm"] = None
@@ -565,12 +692,111 @@ if lancer:
             st.session_state["date_12m_debut"] = date_12m_debut
             st.session_state["cols_annuelles"] = cols_annuelles
             st.session_state["df_st_raw"] = df_st_raw
+            st.session_state.setdefault("analysis_history", []).append({
+                "Date": pd.Timestamp.now().strftime('%d/%m/%Y %H:%M'),
+                "Utilisateur": st.session_state.get("auth_user", ""),
+                "Catégorie": "Toutes",
+                "Nombre d'articles": len(sm),
+                "Durée d'analyse": "—",
+            })
         if f_mouv is not None:
             st.success("Mouvements fusionnés et base historique mise à jour sur le serveur ✅")
 
 sm = st.session_state.get("sm")
 
+if page == "📚 Historique":
+    st.markdown("<h2 class='woodmat-page-title'>Historique des analyses</h2>", unsafe_allow_html=True)
+    hist = pd.DataFrame(st.session_state.get("analysis_history", []),
+                        columns=["Date", "Utilisateur", "Catégorie", "Nombre d'articles", "Durée d'analyse"])
+    st.markdown("<div class='woodmat-panel'>", unsafe_allow_html=True)
+    st.dataframe(hist, use_container_width=True, height=420)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
+
+if page == "👥 Gestion des utilisateurs":
+    if not can_manage_users():
+        st.error("Accès réservé à l'Administrateur.")
+        st.stop()
+
+    st.markdown("<h2 class='woodmat-page-title'>Gestion des utilisateurs</h2>", unsafe_allow_html=True)
+    users = load_users()
+    users_df = pd.DataFrame(users.values())
+    display_users = users_df.drop(columns=["Mot de passe"], errors="ignore")
+    st.dataframe(display_users, use_container_width=True, height=260)
+
+    add_tab, edit_tab, reset_tab = st.tabs(["Ajouter", "Modifier / Statut", "Réinitialiser le mot de passe"])
+    roles = ["Administrateur", "Direction", "Commercial"]
+
+    with add_tab:
+        with st.form("add_user_form"):
+            nom = st.text_input("Nom")
+            email = st.text_input("Email")
+            role_new = st.selectbox("Rôle", roles, index=1)
+            password = st.text_input("Mot de passe", type="password")
+            add_submit = st.form_submit_button("Ajouter l'utilisateur")
+        if add_submit:
+            email_key = email.strip().lower()
+            if not nom or not email_key or not password:
+                st.error("Nom, email et mot de passe sont obligatoires.")
+            elif email_key in users:
+                st.error("Cet email existe déjà.")
+            else:
+                users[email_key] = {
+                    "Nom": nom, "Email": email_key, "Mot de passe": hash_password(password),
+                    "Rôle": role_new, "Date de création": pd.Timestamp.now().strftime('%d/%m/%Y %H:%M'),
+                    "Dernière connexion": "—", "Statut": "Actif",
+                }
+                save_users(users)
+                st.success("Utilisateur ajouté.")
+                st.rerun()
+
+    with edit_tab:
+        selected = st.selectbox("Utilisateur", sorted(users.keys()), key="edit_user")
+        selected_profile = users[selected]
+        with st.form("edit_user_form"):
+            nom_edit = st.text_input("Nom", value=selected_profile.get("Nom", ""))
+            role_edit = st.selectbox("Rôle", roles, index=roles.index(selected_profile.get("Rôle", "Direction")))
+            statut_edit = st.selectbox("Statut", ["Actif", "Désactivé"],
+                                       index=0 if selected_profile.get("Statut") == "Actif" else 1)
+            col_save, col_delete = st.columns(2)
+            save_submit = col_save.form_submit_button("Modifier")
+            delete_submit = col_delete.form_submit_button("Supprimer")
+        if save_submit:
+            users[selected].update({"Nom": nom_edit, "Rôle": role_edit, "Statut": statut_edit})
+            save_users(users)
+            st.success("Utilisateur modifié.")
+            st.rerun()
+        if delete_submit:
+            if selected == st.session_state.get("auth_user_email"):
+                st.error("Vous ne pouvez pas supprimer votre propre compte connecté.")
+            else:
+                users.pop(selected, None)
+                save_users(users)
+                st.success("Utilisateur supprimé.")
+                st.rerun()
+
+    with reset_tab:
+        selected_reset = st.selectbox("Compte", sorted(users.keys()), key="reset_user")
+        with st.form("reset_password_form"):
+            new_password = st.text_input("Nouveau mot de passe", type="password")
+            reset_submit = st.form_submit_button("Réinitialiser le mot de passe")
+        if reset_submit:
+            if not new_password:
+                st.error("Saisissez un nouveau mot de passe.")
+            else:
+                users[selected_reset]["Mot de passe"] = hash_password(new_password)
+                save_users(users)
+                st.success("Mot de passe réinitialisé.")
+                st.rerun()
+    st.stop()
+
+if page == "📈 Analyses":
+    st.markdown("<h2 class='woodmat-page-title'>Analyses</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='woodmat-coming-soon'>Ce module est prêt à accueillir les prochaines analyses métier.</div>", unsafe_allow_html=True)
+    st.stop()
+
 if sm is None:
+    st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=True)
     st.info("⬅️ Importez le **stock actuel** (et les mouvements de l'année en cours si disponibles) "
             "dans la barre latérale, puis cliquez sur **Générer l'analyse**.")
     st.stop()
@@ -604,6 +830,161 @@ if sel_class:
 if recherche:
     f = f[f['Référence'].astype(str).str.contains(recherche, case=False, na=False)
           | f['Designation'].astype(str).str.contains(recherche, case=False, na=False)]
+
+CLASS_BADGE = {
+    'Excellent': '🟢 Excellent', 'Bon': '🟢 Bon', 'Stock élevé': '🟡 Stock élevé',
+    'Dormant': '🟠 Dormant', 'Rupture': '🔴 Rupture',
+    'Aucun mouvement 12M': '⚪ Aucun mouvement 12M', 'Aucun mouvement': '⚪ Aucun mouvement',
+}
+
+def badge_class(series):
+    return series.map(lambda v: CLASS_BADGE.get(v, v))
+
+def excel_download(label, df, sheet_name, filename, button_type="secondary"):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    st.download_button(label, buf.getvalue(), file_name=filename,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       type=button_type)
+
+
+def add_reappro_action(df):
+    df = df.copy()
+    df["Action"] = "🟢 Rien à faire"
+    df.loc[df["Couverture"] < 1, "Action"] = "🔴 Commander immédiatement"
+    df.loc[(df["Couverture"] >= 1) & (df["Couverture"] <= 2), "Action"] = "🟠 Commander prochainement"
+    return df
+
+st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=True)
+
+if page == "📦 Réapprovisionnement":
+    st.caption("Aide à la décision basée sur la couverture déjà calculée — aucun CUMP utilisé.")
+    reappro_base = add_reappro_action(f)
+    if "reappro_action_filter" not in st.session_state:
+        st.session_state["reappro_action_filter"] = None
+    c1, c2, c3 = st.columns(3)
+    crit = len(reappro_base[reappro_base["Action"] == "🔴 Commander immédiatement"])
+    cons = len(reappro_base[reappro_base["Action"] == "🟠 Commander prochainement"])
+    suff = len(reappro_base[reappro_base["Action"] == "🟢 Rien à faire"])
+    if c1.button(f"🔴 Articles critiques\n{crit}", use_container_width=True):
+        st.session_state["reappro_action_filter"] = "🔴 Commander immédiatement"
+    if c2.button(f"🟠 Réapprovisionnement conseillé\n{cons}", use_container_width=True):
+        st.session_state["reappro_action_filter"] = "🟠 Commander prochainement"
+    if c3.button(f"🟢 Stock suffisant\n{suff}", use_container_width=True):
+        st.session_state["reappro_action_filter"] = "🟢 Rien à faire"
+    if st.button("Afficher tous les niveaux", use_container_width=True):
+        st.session_state["reappro_action_filter"] = None
+
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    with rc1:
+        search_ref = st.text_input("Référence", key="reappro_ref")
+    with rc2:
+        unit_filter = st.multiselect("Unité", sorted(reappro_base['Unite'].dropna().unique()), key="reappro_unit")
+    with rc3:
+        cat_filter = st.multiselect("Catégorie", sorted(reappro_base['Cat'].dropna().unique()), key="reappro_cat")
+    with rc4:
+        class_filter = st.multiselect("Classification", sorted(reappro_base['Class'].dropna().unique()), key="reappro_class")
+
+    reappro = reappro_base.copy()
+    action_filter = st.session_state.get("reappro_action_filter")
+    if action_filter:
+        reappro = reappro[reappro["Action"] == action_filter]
+    if search_ref:
+        reappro = reappro[reappro['Référence'].astype(str).str.contains(search_ref, case=False, na=False)]
+    if unit_filter:
+        reappro = reappro[reappro['Unite'].isin(unit_filter)]
+    if cat_filter:
+        reappro = reappro[reappro['Cat'].isin(cat_filter)]
+    if class_filter:
+        reappro = reappro[reappro['Class'].isin(class_filter)]
+
+    reappro_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'S_12M', 'Couverture', 'Class', 'Action']
+    reappro_df = reappro[reappro_cols].rename(columns={
+        'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel',
+        'S_12M': 'Rotation (12 mois)', 'Class': 'Classification', 'Couverture': 'Couverture (mois)'
+    })
+    reappro_df['Classification'] = badge_class(reappro_df['Classification'])
+    cexp1, cexp2 = st.columns([1, 1])
+    with cexp1:
+        excel_download("Exporter Excel", reappro_df, "Reapprovisionnement",
+                       f"reapprovisionnement_{date_max.strftime('%d_%m_%Y')}.xlsx", "primary")
+    with cexp2:
+        st.button("Exporter PDF", disabled=True, help="Export PDF prévu dans une prochaine version.")
+    st.dataframe(reappro_df, use_container_width=True, height=520)
+    st.stop()
+
+if page == "😴 Stock dormant":
+    st.caption("Articles classés Dormant uniquement — mêmes filtres globaux et recherche dédiée.")
+    dorm = f[f['Class'] == 'Dormant'].copy()
+    dorm_search = st.text_input("Recherche", key="dormant_search")
+    if dorm_search:
+        dorm = dorm[dorm['Référence'].astype(str).str.contains(dorm_search, case=False, na=False)
+                    | dorm['Designation'].astype(str).str.contains(dorm_search, case=False, na=False)]
+    dormant_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois', 'Couverture', 'Dern_Sortie']
+    dormant_df = dorm[dormant_cols].rename(columns={
+        'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
+        'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Couverture': 'Couv. (mois)',
+        'Dern_Sortie': 'Dern. Sortie'
+    })
+    dormant_df['Classification'] = badge_class(dormant_df['Classification'])
+    cexp1, cexp2 = st.columns([1, 1])
+    with cexp1:
+        excel_download("Exporter Excel", dormant_df, "Stock Dormant",
+                       f"stock_dormant_{date_max.strftime('%d_%m_%Y')}.xlsx", "primary")
+    with cexp2:
+        st.button("Exporter PDF", disabled=True, help="Export PDF prévu dans une prochaine version.")
+    st.dataframe(dormant_df, use_container_width=True, height=520)
+    st.stop()
+
+if page == "🪵 Stock Bois Rouge":
+    st.caption("Articles Bois Rouge uniquement — recherche, filtres et export dédié.")
+    bois = f[f['Cat'].astype(str).str.upper().str.contains('BOIS ROUGE', na=False)].copy()
+    bois_search = st.text_input("Recherche", key="bois_rouge_search")
+    if bois_search:
+        bois = bois[bois['Référence'].astype(str).str.contains(bois_search, case=False, na=False)
+                    | bois['Designation'].astype(str).str.contains(bois_search, case=False, na=False)]
+    bois_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois', 'Rotation', 'Couverture']
+    bois_df = bois[bois_cols].rename(columns={
+        'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
+        'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Couverture': 'Couv. (mois)'
+    })
+    bois_df['Classification'] = badge_class(bois_df['Classification'])
+    cexp1, cexp2 = st.columns([1, 1])
+    with cexp1:
+        excel_download("Exporter Excel", bois_df, "Stock Bois Rouge",
+                       f"stock_bois_rouge_vue_{date_max.strftime('%d_%m_%Y')}.xlsx", "primary")
+    with cexp2:
+        st.button("Exporter PDF", disabled=True, help="Export PDF prévu dans une prochaine version.")
+    st.dataframe(bois_df, use_container_width=True, height=520)
+    st.stop()
+
+if page == "⚠️ Alertes":
+    st.caption("Articles en rupture et articles dormants — mêmes filtres que l'analyse courante.")
+    alert_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Dern_Sortie']
+    alert_df = f[f['Class'].isin(['Rupture', 'Dormant'])][alert_cols].rename(columns={
+        'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité',
+        'Class': 'Classification', 'S_12M': 'Sorties 12M', 'Dern_Sortie': 'Dern. Sortie'
+    })
+    if 'Classification' in alert_df.columns:
+        alert_df['Classification'] = badge_class(alert_df['Classification'])
+    st.dataframe(alert_df, use_container_width=True, height=520)
+    st.stop()
+
+if page == "📄 Rapports":
+    st.caption("Exports disponibles pour la vue filtrée courante.")
+    report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois', 'Rotation']
+    report_df = f[report_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
+    buf_report = io.BytesIO()
+    with pd.ExcelWriter(buf_report, engine='openpyxl') as writer:
+        report_df.to_excel(writer, index=False, sheet_name='Rapport Rotation')
+    st.download_button("Exporter Excel", buf_report.getvalue(),
+                       file_name=f"rapport_rotation_{date_max.strftime('%d_%m_%Y')}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       type="primary")
+    st.button("Exporter PDF", disabled=True, help="Export PDF prévu dans une prochaine version.")
+    st.dataframe(report_df, use_container_width=True, height=460)
+    st.stop()
 
 # ── KPIs ─────────────────────────────────────────────────
 stock_par_unite = (
@@ -702,17 +1083,6 @@ rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Uni
                'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Taux_Rot': 'Taux Rot. (%)',
                'Couverture': 'Couv. (mois)', 'Delai': 'Délai (j)', 'Taux_Immob': 'Immob. (%)',
                'Dern_Sortie': 'Dern. Sortie'}
-
-
-CLASS_BADGE = {
-    'Excellent': '🟢 Excellent', 'Bon': '🟢 Bon', 'Stock élevé': '🟡 Stock élevé',
-    'Dormant': '🟠 Dormant', 'Rupture': '🔴 Rupture',
-    'Aucun mouvement 12M': '⚪ Aucun mouvement 12M', 'Aucun mouvement': '⚪ Aucun mouvement',
-}
-
-
-def badge_class(series):
-    return series.map(lambda v: CLASS_BADGE.get(v, v))
 
 
 with tab1:
