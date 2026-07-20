@@ -4,7 +4,7 @@
 - `app.py` — l'application
 - `base_mouvements.pkl` — **la base historique 2020-2025, déjà intégrée** (60 631 mouvements).
   Ce fichier doit être uploadé sur GitHub **à côté de** `app.py`, à la racine du repo.
-- `requirements.txt`, `secrets_exemple.toml`
+- `requirements.txt`, `secrets_exemple.toml` — exemple indiquant qu’aucun secret Streamlit n’est nécessaire pour l’authentification
 
 ## Ce que fait l'app
 - La base historique 2020-2025 est **intégrée en permanence** — l'utilisateur ne l'importe
@@ -20,7 +20,7 @@
 - Tableau dynamique avec mise en forme conditionnelle (couleur par classification)
 - Onglet dédié Stock Dormant
 - Export Excel de la vue filtrée
-- Login obligatoire (utilisateur/mot de passe) avant tout accès
+- Login applicatif obligatoire (email/mot de passe WOODMAT) après chargement de l’app
 - Performance : parsing vectorisé (pas de boucle ligne par ligne) — supporte 60 000+ lignes
   de mouvements sans ralentissement notable.
 
@@ -31,23 +31,30 @@ streamlit run app.py
 ```
 Ça ouvre `http://localhost:8501`.
 
-## Mettre le mot de passe (IMPORTANT avant toute mise en ligne)
-Ne laissez jamais le mot de passe par défaut. Créez un fichier `.streamlit/secrets.toml`
-(copiez `secrets_exemple.toml`) avec vos vrais identifiants :
-```
-[credentials]
-admin = "votre_mot_de_passe_ici"
-```
-Ce fichier ne doit **jamais** être mis sur un dépôt GitHub public.
+## Authentification
+L'application ne doit pas utiliser l'authentification Streamlit Cloud, GitHub, Google, OIDC
+ou un middleware externe : le lien public doit charger directement `app.py`, puis afficher
+uniquement la page de connexion WOODMAT intégrée à l'application.
+
+Le compte initial est créé automatiquement au premier démarrage dans `woodmat_users.json`
+avec l'email `admin@woodmat.local` et le mot de passe `woodmat2026`. Après la première
+connexion, créez vos comptes Direction/Commercial/Administrateur dans le menu
+`👥 Gestion des utilisateurs`, puis changez ou désactivez ce compte initial.
+
+`woodmat_users.json` est un fichier runtime local ignoré par Git. Il ne faut pas configurer
+`st.login()`, `st.logout()`, `st.user`, `st.experimental_user`, `streamlit_authenticator`,
+OIDC, Google ou GitHub dans Streamlit pour cette application.
 
 ## Déployer pour avoir un lien accessible depuis un navigateur
 
 ### Option 1 — Streamlit Community Cloud (gratuit, le plus simple)
 1. Mettez le dossier sur un dépôt GitHub (privé de préférence).
 2. Allez sur https://share.streamlit.io, connectez votre GitHub, choisissez le repo et `app.py`.
-3. Dans les réglages de l'app (Settings → Secrets), collez le contenu de `secrets.toml`.
+3. Dans les réglages Streamlit Cloud, laissez l'application en accès public et ne configurez
+   aucun fournisseur d'identité Streamlit/OIDC/GitHub/Google.
 4. Vous obtenez un lien du type `https://woodmat-rotation.streamlit.app` — accessible
-   depuis n'importe quel navigateur, sans rien installer sur les postes.
+   depuis n'importe quel navigateur, sans connexion Streamlit préalable ; seule la page de
+   connexion WOODMAT de l'application doit apparaître.
 5. Un vrai nom de domaine perso (`https://stock.woodmat.ma`) demande un plan payant
    ou un reverse proxy chez vous — je peux détailler cette étape si besoin.
 
@@ -63,6 +70,6 @@ scénario voulu, je prépare le Dockerfile et le nginx.conf.
   il faudra alors réimporter les mouvements de l'année en cours une fois. Si ça pose problème,
   on peut faire télécharger automatiquement le `.pkl` mis à jour pour que vous le remplaciez
   dans le repo GitHub — dites-le-moi si vous voulez cette option.
-- Le login ici est volontairement simple (un mot de passe partagé par utilisateur).
-  Pour des comptes individuels avec rôles/permissions, il faut une vraie couche
-  d'authentification (ex: Auth0, ou base utilisateurs) — possible à ajouter ensuite.
+- Les comptes applicatifs sont stockés dans `woodmat_users.json` sur le serveur Streamlit.
+  Sur Streamlit Community Cloud, ce stockage peut être réinitialisé lors d'un redéploiement ;
+  recréez alors les comptes depuis le compte administrateur initial.
