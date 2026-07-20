@@ -4,6 +4,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 import os
 import io
+import json
+import hashlib
+import secrets
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -16,6 +19,7 @@ st.set_page_config(page_title="WOODMAT — Rotation du stock", layout="wide",
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_HISTORIQUE = os.path.join(APP_DIR, "base_mouvements.pkl")  # base 2020-2025, livrée avec l'app
+USERS_FILE = os.path.join(APP_DIR, "woodmat_users.json")
 SEUIL = 0.001
 
 CLASS_COLORS = {
@@ -92,6 +96,59 @@ def inject_global_styles():
         unsafe_allow_html=True)
 
 
+def hash_password(password, salt=None):
+    """Hash PBKDF2 local pour les comptes applicatifs."""
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 120_000)
+    return f"{salt}${digest.hex()}"
+
+
+def verify_password(password, stored_hash):
+    try:
+        salt, _digest = stored_hash.split('$', 1)
+    except ValueError:
+        return False
+    return secrets.compare_digest(hash_password(password, salt), stored_hash)
+
+
+def default_users():
+    now = pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')
+    return [{
+        "name": "Administrateur WOODMAT", "email": "admin@woodmat.local",
+        "password_hash": hash_password("woodmat2026"), "role": "Administrateur",
+        "created_at": now, "last_login": "—", "status": "Actif"
+    }]
+
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        users = default_users()
+        save_users(users)
+        return users
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default_users()
+
+
+def save_users(users):
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+
+def get_current_user():
+    email = st.session_state.get("auth_email")
+    for u in load_users():
+        if u.get("email") == email:
+            return u
+    return st.session_state.get("auth_user", {})
+
+
+def user_can_manage_users():
+    return get_current_user().get("role") == "Administrateur"
+
+
 def check_login():
     if st.session_state.get("auth_ok"):
         return True
@@ -103,7 +160,7 @@ def check_login():
             <div class='woodmat-logo'>W</div>
             <div style='text-align:center'>
                 <h1 style='color:#1F3864;margin-bottom:0'>WOODMAT</h1>
-                <p style='color:#64748B;margin-top:0.35rem'>Application métier — Rotation du stock</p>
+                <p style='color:#64748B;margin-top:0.35rem'>Application métier — gestion et analyse des stocks</p>
             </div>
         </div>
         """,
@@ -111,20 +168,83 @@ def check_login():
     col1, col2, col3 = st.columns([1, 1.15, 1])
     with col2:
         with st.form("login_form"):
-            user = st.text_input("Email", placeholder="admin")
+            email = st.text_input("Email", placeholder="admin@woodmat.local")
             pwd = st.text_input("Mot de passe", type="password")
             submit = st.form_submit_button("Se connecter", use_container_width=True)
-        st.caption("Mot de passe oublié ? Contactez votre administrateur WOODMAT.")
+        st.caption("Compte initial : admin@woodmat.local / woodmat2026 — à modifier après la première connexion.")
         if submit:
-            users = st.secrets.get("credentials", {"admin": "woodmat2026"})
-            if user in users and pwd == users[user]:
+            users = load_users()
+            user = next((u for u in users if u.get("email", "").lower() == email.lower().strip()), None)
+            if user and user.get("status") == "Actif" and verify_password(pwd, user.get("password_hash", "")):
+                last_login = pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')
+                user["last_login"] = last_login
+                save_users(users)
                 st.session_state["auth_ok"] = True
+                st.session_state["auth_email"] = user["email"]
                 st.session_state["auth_user"] = user
-                st.session_state["last_login"] = pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')
+                st.session_state["last_login"] = last_login
                 st.rerun()
+            elif user and user.get("status") != "Actif":
+                st.error("Compte désactivé. Contactez votre administrateur WOODMAT.")
             else:
                 st.error("Identifiants incorrects.")
     return False
+
+
+def render_user_management():
+    st.markdown("<h2 class='woodmat-page-title'>👥 Gestion des utilisateurs</h2>", unsafe_allow_html=True)
+    if not user_can_manage_users():
+        st.error("Accès réservé à l'Administrateur.")
+        st.stop()
+    users = load_users()
+    st.caption("Création, modification, désactivation et réinitialisation des accès WOODMAT.")
+    with st.expander("➕ Ajouter un utilisateur", expanded=True):
+        with st.form("add_user"):
+            c1, c2 = st.columns(2)
+            name = c1.text_input("Nom")
+            email = c2.text_input("Email")
+            role = c1.selectbox("Rôle", ["Direction", "Commercial", "Administrateur"])
+            pwd = c2.text_input("Mot de passe initial", type="password")
+            if st.form_submit_button("Créer l'utilisateur", type="primary"):
+                if not name or not email or not pwd:
+                    st.error("Nom, email et mot de passe sont obligatoires.")
+                elif any(u.get("email", "").lower() == email.lower().strip() for u in users):
+                    st.error("Cet email existe déjà.")
+                else:
+                    users.append({"name": name, "email": email.lower().strip(), "password_hash": hash_password(pwd),
+                                  "role": role, "created_at": pd.Timestamp.now().strftime('%d/%m/%Y %H:%M'),
+                                  "last_login": "—", "status": "Actif"})
+                    save_users(users); st.success("Utilisateur créé."); st.rerun()
+
+    display = pd.DataFrame([{k: u.get(k) for k in ["name", "email", "role", "created_at", "last_login", "status"]} for u in users])
+    st.dataframe(display.rename(columns={"name":"Nom", "email":"Email", "role":"Rôle", "created_at":"Date de création", "last_login":"Dernière connexion", "status":"Statut"}), use_container_width=True)
+    selected = st.selectbox("Utilisateur à administrer", [u["email"] for u in users])
+    user = next(u for u in users if u["email"] == selected)
+    with st.form("edit_user"):
+        c1, c2, c3 = st.columns(3)
+        new_name = c1.text_input("Nom", value=user.get("name", ""))
+        new_role = c2.selectbox("Rôle", ["Administrateur", "Direction", "Commercial"], index=["Administrateur", "Direction", "Commercial"].index(user.get("role", "Direction")))
+        new_status = c3.selectbox("Statut", ["Actif", "Désactivé"], index=0 if user.get("status") == "Actif" else 1)
+        new_pwd = st.text_input("Nouveau mot de passe (laisser vide pour ne pas changer)", type="password")
+        a, b, c = st.columns(3)
+        save_btn = a.form_submit_button("Modifier")
+        reset_btn = b.form_submit_button("Réinitialiser le mot de passe")
+        delete_btn = c.form_submit_button("Supprimer")
+        if save_btn or reset_btn or delete_btn:
+            if delete_btn:
+                if user["email"] == st.session_state.get("auth_email"):
+                    st.error("Vous ne pouvez pas supprimer votre propre compte connecté.")
+                else:
+                    users = [u for u in users if u["email"] != selected]
+                    save_users(users); st.success("Utilisateur supprimé."); st.rerun()
+            else:
+                user["name"], user["role"], user["status"] = new_name, new_role, new_status
+                if new_pwd:
+                    user["password_hash"] = hash_password(new_pwd)
+                if reset_btn and not new_pwd:
+                    st.warning("Saisissez un nouveau mot de passe avant de réinitialiser.")
+                else:
+                    save_users(users); st.success("Utilisateur mis à jour."); st.rerun()
 
 
 # ============================================================
@@ -311,6 +431,57 @@ def evolution_mensuelle(df_mv, references=None):
     d = d.copy()
     d['Mois'] = d['Date'].dt.to_period('M').dt.to_timestamp()
     return d.groupby('Mois', as_index=False)['Qty'].sum()
+
+
+
+def make_pdf_bytes(title, df, date_max):
+    """Génère un PDF texte simple sans dépendance externe."""
+    lines = [f"WOODMAT - {title}", f"Analyse du {date_max.strftime('%d/%m/%Y')}", ""]
+    lines.extend([" | ".join(map(str, row[:8])) for row in df.head(80).itertuples(index=False, name=None)])
+    content = "BT /F1 10 Tf 40 800 Td "
+    escaped = []
+    for line in lines:
+        safe = str(line).replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')[:120]
+        escaped.append(f"({safe}) Tj 0 -14 Td")
+    stream = (content + " ".join(escaped) + " ET").encode('latin-1', errors='replace')
+    objects = [
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
+        b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+        b"5 0 obj << /Length " + str(len(stream)).encode() + b" >> stream\n" + stream + b"\nendstream endobj",
+    ]
+    pdf = b"%PDF-1.4\n"
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf)); pdf += obj + b"\n"
+    xref = len(pdf)
+    pdf += f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode()
+    for off in offsets[1:]:
+        pdf += f"{off:010d} 00000 n \n".encode()
+    pdf += f"trailer << /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    return pdf
+
+
+def add_export_buttons(df, basename, sheet_name, date_max):
+    c1, c2 = st.columns([1, 1])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+    c1.download_button("⬇️ Exporter Excel", buf.getvalue(),
+                       file_name=f"{basename}_{date_max.strftime('%d_%m_%Y')}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    c2.download_button("⬇️ Exporter PDF", make_pdf_bytes(sheet_name, df, date_max),
+                       file_name=f"{basename}_{date_max.strftime('%d_%m_%Y')}.pdf",
+                       mime="application/pdf")
+
+
+def replenishment_action(couverture):
+    if couverture < 1:
+        return "🔴 Commander immédiatement"
+    if couverture <= 2:
+        return "🟠 Commander prochainement"
+    return "🟢 Rien à faire"
 
 
 # ============================================================
@@ -545,13 +716,15 @@ if not os.path.exists(BASE_HISTORIQUE):
 inject_global_styles()
 
 MENU_ITEMS = [
-    "🏠 Dashboard", "📦 Rotation du stock", "📈 Analyses", "⚠️ Alertes",
-    "📄 Rapports", "📚 Historique", "⚙️ Paramètres", "👤 Mon profil"
+    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚠️ Alertes",
+    "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"
 ]
+if user_can_manage_users():
+    MENU_ITEMS.append("👥 Gestion des utilisateurs")
 
 with st.sidebar:
     st.markdown("### 🪵 WOODMAT")
-    st.caption(f"Connecté : {st.session_state.get('auth_user', '')}")
+    st.caption(f"Connecté : {get_current_user().get('name', '')}")
     st.divider()
     page = st.radio("Navigation", MENU_ITEMS, label_visibility="collapsed")
     st.divider()
@@ -560,7 +733,7 @@ with st.sidebar:
     f_mouv = None
     f_stock = None
     lancer = False
-    if page in ["🏠 Dashboard", "📦 Rotation du stock"]:
+    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚠️ Alertes", "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"]:
         st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
         f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
 
@@ -569,7 +742,9 @@ with st.sidebar:
 
         lancer = st.button("🔄 Générer l'analyse", type="primary", use_container_width=True)
 
-user = st.session_state.get('auth_user', '')
+current_user = get_current_user()
+user = current_user.get('name', current_user.get('email', ''))
+role = current_user.get('role', '—')
 today = pd.Timestamp.now().strftime('%d/%m/%Y')
 st.markdown(
     f"""
@@ -578,7 +753,7 @@ st.markdown(
             <div class='woodmat-logo' style='width:42px;height:42px;border-radius:13px;font-size:1.2rem;margin:0'>W</div>
             <div><div class='woodmat-header-title'>WOODMAT — Rotation du stock</div><div class='woodmat-muted'>Application métier</div></div>
         </div>
-        <div class='woodmat-header-meta'>📅 {today}<br>👤 {user}</div>
+        <div class='woodmat-header-meta'>📅 {today}<br>👤 {user}<br>🔐 {role}</div>
     </div>
     """,
     unsafe_allow_html=True)
@@ -615,7 +790,7 @@ if lancer:
             st.session_state["df_st_raw"] = df_st_raw
             st.session_state.setdefault("analysis_history", []).append({
                 "Date": pd.Timestamp.now().strftime('%d/%m/%Y %H:%M'),
-                "Utilisateur": st.session_state.get("auth_user", ""),
+                "Utilisateur": get_current_user().get("name", ""),
                 "Catégorie": "Toutes",
                 "Nombre d'articles": len(sm),
                 "Durée d'analyse": "—",
@@ -625,6 +800,10 @@ if lancer:
 
 sm = st.session_state.get("sm")
 
+if page == "👥 Gestion des utilisateurs":
+    render_user_management()
+    st.stop()
+
 if page == "📚 Historique":
     st.markdown("<h2 class='woodmat-page-title'>Historique des analyses</h2>", unsafe_allow_html=True)
     hist = pd.DataFrame(st.session_state.get("analysis_history", []),
@@ -632,34 +811,6 @@ if page == "📚 Historique":
     st.markdown("<div class='woodmat-panel'>", unsafe_allow_html=True)
     st.dataframe(hist, use_container_width=True, height=420)
     st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
-
-if page == "⚙️ Paramètres":
-    st.markdown("<h2 class='woodmat-page-title'>Paramètres</h2>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.number_input("Seuil rupture", value=float(SEUIL), format="%.4f")
-    with c2:
-        st.number_input("Seuil dormant", value=12, min_value=1, step=1, help="Prévu pour une utilisation future.")
-    with c3:
-        st.number_input("Nombre de mois analysés", value=12, min_value=1, step=1)
-    st.info("Ces paramètres préparent les prochaines évolutions et ne modifient pas les calculs actuels.")
-    st.stop()
-
-if page == "👤 Mon profil":
-    st.markdown("<h2 class='woodmat-page-title'>Mon profil</h2>", unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class='woodmat-panel'>
-        <strong>Nom</strong><br>{user}<br><br>
-        <strong>Email</strong><br>{user}<br><br>
-        <strong>Dernière connexion</strong><br>{st.session_state.get('last_login', '—')}
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
-
-if page == "📈 Analyses":
-    st.markdown("<h2 class='woodmat-page-title'>Analyses</h2>", unsafe_allow_html=True)
-    st.markdown("<div class='woodmat-coming-soon'>Ce module est prêt à accueillir les prochaines analyses métier.</div>", unsafe_allow_html=True)
     st.stop()
 
 if sm is None:
@@ -680,13 +831,23 @@ st.caption(
 
 # ── Filtres ──────────────────────────────────────────────
 fc1, fc2, fc3 = st.columns([2, 2, 2])
+fc4, fc5, fc6 = st.columns([2, 2, 2])
 with fc1:
     cats = sorted(sm['Cat'].dropna().unique())
-    sel_cats = st.multiselect("Catégorie de bois", cats, default=[])
+    sel_cats = st.multiselect("Catégorie", cats, default=[])
 with fc2:
     classes = sorted(sm['Class'].unique())
     sel_class = st.multiselect("Classification", classes, default=[])
 with fc3:
+    unites = sorted(sm['Unite'].dropna().astype(str).unique())
+    sel_unites = st.multiselect("Unité", unites, default=[])
+with fc4:
+    references = sorted(sm['Référence'].dropna().astype(str).unique())
+    sel_refs = st.multiselect("Référence", references, default=[])
+with fc5:
+    designations = sorted(sm['Designation'].dropna().astype(str).unique())
+    sel_designations = st.multiselect("Désignation", designations, default=[])
+with fc6:
     recherche = st.text_input("🔍 Recherche référence ou désignation")
 
 f = sm.copy()
@@ -694,6 +855,12 @@ if sel_cats:
     f = f[f['Cat'].isin(sel_cats)]
 if sel_class:
     f = f[f['Class'].isin(sel_class)]
+if sel_unites:
+    f = f[f['Unite'].astype(str).isin(sel_unites)]
+if sel_refs:
+    f = f[f['Référence'].astype(str).isin(sel_refs)]
+if sel_designations:
+    f = f[f['Designation'].astype(str).isin(sel_designations)]
 if recherche:
     f = f[f['Référence'].astype(str).str.contains(recherche, case=False, na=False)
           | f['Designation'].astype(str).str.contains(recherche, case=False, na=False)]
@@ -708,6 +875,176 @@ def badge_class(series):
     return series.map(lambda v: CLASS_BADGE.get(v, v))
 
 st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=True)
+
+display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
+                 'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
+rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
+               'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Taux_Rot': 'Taux Rot. (%)',
+               'Couverture': 'Couv. (mois)', 'Delai': 'Délai (j)', 'Taux_Immob': 'Immob. (%)',
+               'Dern_Sortie': 'Dern. Sortie'}
+
+if page == "📈 Analyses":
+    st.caption("Centre d'analyse métier WOODMAT — analyses construites uniquement à partir des données chargées.")
+    refs_analyse = f['Référence'].dropna().astype(str).unique().tolist()
+    mv_filtered = df_mv[df_mv['Reference'].astype(str).isin(refs_analyse)].copy()
+    mv_filtered['Mois'] = mv_filtered['Date'].dt.to_period('M').dt.to_timestamp()
+
+    tabs = st.tabs([
+        "ABC", "Rotation / catégorie", "Dormants", "Ruptures", "Réappro.",
+        "Meilleures rotations", "Faibles rotations", "Couverture / catégorie",
+        "Mouvements E/S", "Sorties mensuelles", "Niveaux rotation"
+    ])
+
+    with tabs[0]:
+        abc = f[['Référence', 'Designation', 'Cat', 'Unite', 'S_12M', 'Stock', 'Rotation', 'Class']].copy()
+        abc = abc.sort_values('S_12M', ascending=False)
+        total_sorties = abc['S_12M'].sum()
+        abc['Part sorties 12M (%)'] = (abc['S_12M'] / total_sorties * 100).fillna(0).round(2) if total_sorties else 0
+        abc['Cumul sorties 12M (%)'] = abc['Part sorties 12M (%)'].cumsum().round(2)
+        abc['Classe ABC'] = 'C'
+        abc.loc[abc['Cumul sorties 12M (%)'] <= 80, 'Classe ABC'] = 'A'
+        abc.loc[(abc['Cumul sorties 12M (%)'] > 80) & (abc['Cumul sorties 12M (%)'] <= 95), 'Classe ABC'] = 'B'
+        abc = abc.rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'S_12M': 'Sorties 12M', 'Class': 'Classification'})
+        fig = px.bar(abc.head(30), x='Référence', y='Sorties 12M', color='Classe ABC', title='Analyse ABC — Top 30 par sorties 12M')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(abc, 'analyse_abc', 'Analyse ABC', date_max)
+        st.dataframe(abc, use_container_width=True, height=430)
+
+    with tabs[1]:
+        cat_rot = f.groupby('Cat', as_index=False).agg(Articles=('Référence', 'count'), Stock=('Stock', 'sum'), Sorties_12M=('S_12M', 'sum'))
+        cat_rot['Rotation pondérée'] = (cat_rot['Sorties_12M'] / cat_rot['Stock']).replace([float('inf'), -float('inf')], 0).fillna(0).round(2)
+        cat_rot = cat_rot.rename(columns={'Cat': 'Catégorie', 'Sorties_12M': 'Sorties 12M'})
+        fig = px.bar(cat_rot.sort_values('Rotation pondérée', ascending=False), x='Catégorie', y='Rotation pondérée', color='Articles', title='Rotation par catégorie')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(cat_rot, 'analyse_rotation_categorie', 'Rotation par catégorie', date_max)
+        st.dataframe(cat_rot, use_container_width=True, height=430)
+
+    with tabs[2]:
+        dorm = f[f['Class'] == 'Dormant'][display_cols].rename(columns=rename_cols)
+        dorm['Classification'] = badge_class(dorm['Classification'])
+        by_cat = dorm.groupby('Catégorie', as_index=False).agg(Articles=('Référence', 'count'), Stock=('Stock', 'sum')) if not dorm.empty else pd.DataFrame(columns=['Catégorie', 'Articles', 'Stock'])
+        fig = px.bar(by_cat.sort_values('Articles', ascending=False), x='Catégorie', y='Articles', title='Stocks dormants par catégorie')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(dorm, 'analyse_stocks_dormants', 'Stocks dormants', date_max)
+        st.dataframe(dorm, use_container_width=True, height=430)
+
+    with tabs[3]:
+        rup = f[f['Class'] == 'Rupture'][display_cols].rename(columns=rename_cols)
+        rup['Classification'] = badge_class(rup['Classification'])
+        by_cat = rup.groupby('Catégorie', as_index=False).agg(Articles=('Référence', 'count')) if not rup.empty else pd.DataFrame(columns=['Catégorie', 'Articles'])
+        fig = px.bar(by_cat.sort_values('Articles', ascending=False), x='Catégorie', y='Articles', title='Ruptures par catégorie')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(rup, 'analyse_ruptures', 'Ruptures', date_max)
+        st.dataframe(rup, use_container_width=True, height=430)
+
+    with tabs[4]:
+        rep = f.copy()
+        rep['Action'] = rep['Couverture'].apply(replenishment_action)
+        rep = rep[rep['Couverture'] <= 2]
+        rep_df = rep[['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Rotation', 'Couverture', 'Class', 'Action']].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)'})
+        fig = px.histogram(rep_df, x='Action', color='Classification', title='Articles à réapprovisionner par action')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(rep_df, 'analyse_reapprovisionnement', 'Réapprovisionnement', date_max)
+        st.dataframe(rep_df.sort_values('Couverture (mois)'), use_container_width=True, height=430)
+
+    with tabs[5]:
+        best = f[f['Rotation'] > 0].sort_values('Rotation', ascending=False).head(50)[display_cols].rename(columns=rename_cols)
+        best['Classification'] = badge_class(best['Classification'])
+        fig = px.bar(best.head(20), x='Référence', y='Rotation', color='Catégorie', title='Meilleures rotations — Top 20')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(best, 'analyse_meilleures_rotations', 'Meilleures rotations', date_max)
+        st.dataframe(best, use_container_width=True, height=430)
+
+    with tabs[6]:
+        low = f[(f['Rotation'] > 0) & (f['Class'] != 'Rupture')].sort_values('Rotation', ascending=True).head(50)[display_cols].rename(columns=rename_cols)
+        low['Classification'] = badge_class(low['Classification'])
+        fig = px.bar(low.head(20), x='Référence', y='Rotation', color='Catégorie', title='Plus faibles rotations — Top 20')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(low, 'analyse_faibles_rotations', 'Faibles rotations', date_max)
+        st.dataframe(low, use_container_width=True, height=430)
+
+    with tabs[7]:
+        cov = f.groupby('Cat', as_index=False).agg(Articles=('Référence', 'count'), Couverture_moyenne=('Couverture', 'mean'), Stock=('Stock', 'sum'))
+        cov['Couverture moyenne (mois)'] = cov['Couverture_moyenne'].round(1)
+        cov = cov.drop(columns='Couverture_moyenne').rename(columns={'Cat': 'Catégorie'})
+        fig = px.bar(cov.sort_values('Couverture moyenne (mois)', ascending=False), x='Catégorie', y='Couverture moyenne (mois)', color='Articles', title='Couverture moyenne par catégorie')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(cov, 'analyse_couverture_categorie', 'Couverture par catégorie', date_max)
+        st.dataframe(cov, use_container_width=True, height=430)
+
+    with tabs[8]:
+        mov = mv_filtered.groupby(['Mois', 'ES'], as_index=False)['Qty'].sum().rename(columns={'ES': 'Type mouvement', 'Qty': 'Quantité'})
+        fig = px.bar(mov, x='Mois', y='Quantité', color='Type mouvement', barmode='group', title='Analyse des mouvements — Entrées / Sorties')
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(mov, 'analyse_mouvements', 'Mouvements ES', date_max)
+        st.dataframe(mov, use_container_width=True, height=430)
+
+    with tabs[9]:
+        evo = evolution_mensuelle(df_mv, refs_analyse)
+        fig = px.line(evo, x='Mois', y='Qty', markers=True, title='Évolution mensuelle des sorties')
+        fig.update_yaxes(title='Quantité sortie')
+        st.plotly_chart(fig, use_container_width=True)
+        evo_export = evo.rename(columns={'Qty': 'Quantité sortie'})
+        add_export_buttons(evo_export, 'analyse_sorties_mensuelles', 'Sorties mensuelles', date_max)
+        st.dataframe(evo_export, use_container_width=True, height=430)
+
+    with tabs[10]:
+        dist = f['Class'].value_counts().reset_index()
+        dist.columns = ['Classification', 'Articles']
+        fig = px.pie(dist, names='Classification', values='Articles', hole=0.45, title='Répartition des articles par niveau de rotation', color='Classification', color_discrete_map=CLASS_COLORS)
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(dist, 'analyse_niveaux_rotation', 'Niveaux rotation', date_max)
+        st.dataframe(dist, use_container_width=True, height=430)
+    st.stop()
+
+if page == "📦 Réapprovisionnement":
+    st.caption("Aide à la décision : articles nécessitant une commande selon leur couverture. Le CUMP n'est pas utilisé.")
+    rep = f.copy()
+    rep['Action'] = rep['Couverture'].apply(replenishment_action)
+    rep['Priorité'] = rep['Couverture'].apply(lambda v: '🔴 Articles critiques' if v < 1 else ('🟠 Réapprovisionnement conseillé' if v <= 2 else '🟢 Stock suffisant'))
+    kc1, kc2, kc3 = st.columns(3)
+    filters = {
+        '🔴 Articles critiques': rep[rep['Couverture'] < 1],
+        '🟠 Réapprovisionnement conseillé': rep[(rep['Couverture'] >= 1) & (rep['Couverture'] <= 2)],
+        '🟢 Stock suffisant': rep[rep['Couverture'] > 2],
+    }
+    for col, label in zip([kc1, kc2, kc3], filters):
+        if col.button(f"{label}\n\n{len(filters[label])} article(s)", use_container_width=True):
+            st.session_state['reappro_filter'] = label
+    selected_priority = st.session_state.get('reappro_filter')
+    if selected_priority:
+        st.info(f"Filtre actif : {selected_priority}")
+        rep = filters[selected_priority]
+    rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Rotation', 'Couverture', 'Class', 'Action']
+    rep_df = rep[rep_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)'})
+    rep_df['Classification'] = badge_class(rep_df['Classification'])
+    add_export_buttons(rep_df, 'reapprovisionnement', 'Réapprovisionnement', date_max)
+    st.dataframe(rep_df.sort_values('Couverture (mois)'), use_container_width=True, height=520)
+    st.stop()
+
+if page == "😴 Stock dormant":
+    st.caption("Articles classés Dormant uniquement — recherche, filtres et exports dédiés.")
+    dorm = f[f['Class'] == 'Dormant'][display_cols].rename(columns=rename_cols)
+    dorm['Classification'] = badge_class(dorm['Classification'])
+    add_export_buttons(dorm, 'stock_dormant', 'Stock Dormant', date_max)
+    st.dataframe(dorm.sort_values('Immob. (%)', ascending=False), use_container_width=True, height=520)
+    st.stop()
+
+if page == "🪵 Stock Bois Rouge":
+    st.caption("Articles BOIS ROUGE uniquement — recherche, filtres et exports dédiés.")
+    br = f[f['Cat'].astype(str).str.upper().eq('BOIS ROUGE')][display_cols].rename(columns=rename_cols)
+    br['Classification'] = badge_class(br['Classification'])
+    add_export_buttons(br, 'stock_bois_rouge_articles', 'Articles Bois Rouge', date_max)
+    st.dataframe(br, use_container_width=True, height=520)
+    st.divider()
+    df_st_raw = st.session_state.get("df_st_raw")
+    if df_st_raw is not None:
+        br_bytes, non_reconnus = generer_excel_bois_rouge(df_st_raw, date_max)
+        if br_bytes:
+            st.download_button("⬇️ Télécharger la synthèse Qualité × Fournisseur × Dimension", br_bytes,
+                               file_name=f"stock_bois_rouge_synthese_{date_max.strftime('%d_%m_%Y')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    st.stop()
 
 if page == "⚠️ Alertes":
     st.caption("Articles en rupture et articles dormants — mêmes filtres que l'analyse courante.")
@@ -725,14 +1062,7 @@ if page == "📄 Rapports":
     st.caption("Exports disponibles pour la vue filtrée courante.")
     report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois', 'Rotation']
     report_df = f[report_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
-    buf_report = io.BytesIO()
-    with pd.ExcelWriter(buf_report, engine='openpyxl') as writer:
-        report_df.to_excel(writer, index=False, sheet_name='Rapport Rotation')
-    st.download_button("Exporter Excel", buf_report.getvalue(),
-                       file_name=f"rapport_rotation_{date_max.strftime('%d_%m_%Y')}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       type="primary")
-    st.button("Exporter PDF", disabled=True, help="Export PDF prévu dans une prochaine version.")
+    add_export_buttons(report_df, 'rapport_rotation', 'Rapport Rotation', date_max)
     st.dataframe(report_df, use_container_width=True, height=460)
     st.stop()
 
@@ -789,7 +1119,7 @@ gcol, tcol = st.columns([1.3, 1])
 with gcol:
     st.markdown("<div class='woodmat-section-title'>Historique des sorties mensuelles</div>", unsafe_allow_html=True)
     st.markdown("<div class='woodmat-muted'>Quantités sorties par mois sur les 12 derniers mois.</div>", unsafe_allow_html=True)
-    refs_filtrees = f['Référence'].tolist() if (sel_cats or sel_class or recherche) else None
+    refs_filtrees = f['Référence'].tolist() if (sel_cats or sel_class or sel_unites or sel_refs or sel_designations or recherche) else None
     evo = evolution_mensuelle(df_mv, refs_filtrees)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=evo['Mois'], y=evo['Qty'], mode='lines+markers',
@@ -826,14 +1156,6 @@ st.divider()
 # ── Tableau dynamique ───────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", "📅 Historique par année",
                                     "🪵 Stock Bois Rouge"])
-
-display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
-                 'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
-rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
-               'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Taux_Rot': 'Taux Rot. (%)',
-               'Couverture': 'Couv. (mois)', 'Delai': 'Délai (j)', 'Taux_Immob': 'Immob. (%)',
-               'Dern_Sortie': 'Dern. Sortie'}
-
 
 with tab1:
     tdf = f[display_cols].rename(columns=rename_cols).sort_values('Taux Rot. (%)', ascending=False)
