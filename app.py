@@ -23,9 +23,9 @@ USERS_FILE = os.path.join(APP_DIR, "woodmat_users.json")
 SEUIL = 0.001
 
 CLASS_COLORS = {
-    'Excellent': '#C6EFCE', 'Bon': '#E2EFDA', 'Stock élevé': '#FFEB9C',
-    'Dormant': '#F4B942', 'Rupture': '#FFC7CE',
-    'Aucun mouvement 12M': '#E0E0E0', 'Aucun mouvement': '#E0E0E0',
+    'Rupture': '#FFC7CE', 'Critique': '#FF8A8A', 'Stock faible': '#FFD9A0',
+    'Normal': '#FFEB9C', 'Bon niveau': '#C6EFCE', 'Surstock': '#BDD7EE',
+    'Surstock important': '#9FA8B5', 'Dormant': '#F4B942', 'Sans mouvement': '#E0E0E0',
 }
 
 # ============================================================
@@ -300,6 +300,53 @@ def charger_base_historique():
     return pd.read_pickle(BASE_HISTORIQUE)
 
 
+def _stock_moyen_pondere(events_df, date_debut, date_fin, stock_actuel):
+    """
+    Reconstruit le STOCK MOYEN réel (pondéré dans le temps) sur [date_debut, date_fin],
+    par référence, à partir :
+      - du Stock actuel (connu avec certitude à date_fin, issu de l'export ERP du jour) ;
+      - de l'historique des mouvements (entrées positives, sorties négatives) survenus
+        dans la fenêtre, avec leur date exacte.
+
+    Logique : en partant du niveau connu à date_fin, on "remonte" mouvement par
+    mouvement pour reconstituer le niveau de stock à chaque instant du passé, puis on
+    calcule la moyenne pondérée par la durée de chaque palier (et non une simple
+    moyenne arithmétique des mouvements, qui ignorerait le temps réellement passé à
+    chaque niveau de stock).
+
+    Hypothèse (à connaître) : cette reconstruction suppose que les mouvements ES
+    ('S','E','ME','TE') couvrent bien toutes les variations de stock sur la période
+    (pas d'ajustement d'inventaire hors mouvement, pas de perte/casse non enregistrée).
+    Les niveaux reconstruits sont plafonnés à 0 (un stock ne peut pas être négatif) —
+    si ce plafonnage se déclenche souvent, c'est le signe d'un écart entre la date de
+    l'export stock et la couverture réelle des mouvements.
+    """
+    total_duration = (date_fin - date_debut).total_seconds()
+    resultat = stock_actuel.astype(float).copy()
+    if total_duration <= 0 or events_df.empty:
+        return resultat
+
+    for ref, g in events_df.sort_values('Date').groupby('Reference'):
+        if ref not in resultat.index:
+            continue
+        s_now = stock_actuel.get(ref, 0.0)
+        niveau = s_now - g['Delta'].sum()  # niveau au début de la fenêtre
+        t_prec = date_debut
+        somme_ponderee = 0.0
+        for d, delta in zip(g['Date'], g['Delta']):
+            duree = (d - t_prec).total_seconds()
+            if duree > 0:
+                somme_ponderee += max(niveau, 0.0) * duree
+            niveau += delta
+            t_prec = d
+        duree = (date_fin - t_prec).total_seconds()
+        if duree > 0:
+            somme_ponderee += max(niveau, 0.0) * duree
+        resultat.loc[ref] = somme_ponderee / total_duration
+
+    return resultat
+
+
 @st.cache_data(show_spinner=False)
 def calculer_indicateurs(df_mv, df_st_bytes):
     df_st = pd.read_excel(df_st_bytes)
@@ -342,6 +389,23 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     mv_s_12m = s_12m_df.groupby('Reference').agg(S_12M=('Qty', 'sum'), T_12M=('Qty', 'count')).reset_index()
     mv_e_12m = e_12m_df.groupby('Reference')['Qty'].sum().rename('A_12M').reset_index()
 
+    # ── Fenêtre 4 mois (tendance récente) ──
+    date_4m_debut = date_max - pd.DateOffset(months=4)
+    s_4m_df = sorties[(sorties['Date'] >= date_4m_debut) & (sorties['Date'] <= date_max)]
+    e_4m_df = entrees[(entrees['Date'] >= date_4m_debut) & (entrees['Date'] <= date_max)]
+    mv_s_4m = s_4m_df.groupby('Reference')['Qty'].sum().rename('S_4M').reset_index()
+
+    # ── Historique des mouvements signés (entrée = +, sortie = -), pour reconstituer
+    #    le stock moyen réel sur chaque fenêtre à partir du stock actuel connu ──
+    events_12m = pd.concat([
+        s_12m_df[['Reference', 'Date', 'Qty']].assign(Delta=lambda d: -d['Qty']),
+        e_12m_df[['Reference', 'Date', 'Qty']].assign(Delta=lambda d: d['Qty']),
+    ], ignore_index=True) if (len(s_12m_df) or len(e_12m_df)) else pd.DataFrame(columns=['Reference', 'Date', 'Qty', 'Delta'])
+    events_4m = pd.concat([
+        s_4m_df[['Reference', 'Date', 'Qty']].assign(Delta=lambda d: -d['Qty']),
+        e_4m_df[['Reference', 'Date', 'Qty']].assign(Delta=lambda d: d['Qty']),
+    ], ignore_index=True) if (len(s_4m_df) or len(e_4m_df)) else pd.DataFrame(columns=['Reference', 'Date', 'Qty', 'Delta'])
+
     # ── Historique par année (S_2020, S_2021 ... / A_2020, A_2021 ...) ──
     sorties_y = sorties.assign(Annee=sorties['Date'].dt.year)
     entrees_y = entrees.assign(Annee=entrees['Date'].dt.year)
@@ -358,50 +422,87 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     sm = sm.merge(mv_e_all, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
     sm = sm.merge(mv_s_12m, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
     sm = sm.merge(mv_e_12m, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
+    sm = sm.merge(mv_s_4m, left_on='Référence', right_on='Reference', how='left').drop(columns='Reference', errors='ignore')
     sm = sm.merge(piv_s, left_on='Référence', right_index=True, how='left')
     sm = sm.merge(piv_t, left_on='Référence', right_index=True, how='left')
     sm = sm.merge(piv_a, left_on='Référence', right_index=True, how='left')
-    for c in ['Total_Sorti', 'Nb_Trans', 'S_12M', 'T_12M', 'A_12M'] + cols_annuelles:
+    for c in ['Total_Sorti', 'Nb_Trans', 'S_12M', 'T_12M', 'A_12M', 'S_4M'] + cols_annuelles:
         sm[c] = sm[c].fillna(0)
 
-    nb_mois_12m = 12.0
-    # Calculs vectorisés (pas d'apply row-wise — rapide même sur beaucoup de références)
-    sm['Moy_Mois'] = (sm['S_12M'] / nb_mois_12m).round(3)
     stock_ok = sm['Stock'] > SEUIL
 
-    sm['Taux_Rot'] = 0.0
-    m = stock_ok & (sm['Moy_Mois'] > 0)
-    sm.loc[m, 'Taux_Rot'] = ((sm.loc[m, 'Moy_Mois'] / sm.loc[m, 'Stock']) * 100).round(1)
+    # ── Stock moyen réel 12M / 4M (reconstruit depuis le stock actuel + l'historique
+    #    des mouvements datés — voir _stock_moyen_pondere) ──
+    stock_actuel_series = sm.set_index('Référence')['Stock']
+    stock_moyen_12m = _stock_moyen_pondere(events_12m, date_12m_debut, date_max, stock_actuel_series)
+    stock_moyen_4m = _stock_moyen_pondere(events_4m, date_4m_debut, date_max, stock_actuel_series)
+    sm['Stock_moyen_12M'] = sm['Référence'].map(stock_moyen_12m).fillna(sm['Stock']).round(3)
+    sm['Stock_moyen_4M'] = sm['Référence'].map(stock_moyen_4m).fillna(sm['Stock']).round(3)
 
-    sm['Rotation'] = 0.0
-    m = stock_ok & (sm['S_12M'] > 0)
-    sm.loc[m, 'Rotation'] = (sm.loc[m, 'S_12M'] / sm.loc[m, 'Stock']).round(2)
+    # ── Moyennes mensuelles ──
+    sm['Moy_Mois_12M'] = (sm['S_12M'] / 12.0).round(3)
+    sm['Moy_Mois_4M'] = (sm['S_4M'] / 4.0).round(3)
 
-    sm['Couverture'] = 0.0
-    m = (sm['Moy_Mois'] > 0) & stock_ok
-    sm.loc[m, 'Couverture'] = (sm.loc[m, 'Stock'] / sm.loc[m, 'Moy_Mois']).round(1)
+    # ── Rotation 12M et 4M = Sorties ÷ STOCK MOYEN de la période (plus jamais le stock
+    #    actuel), ce qui évite l'explosion du ratio quand le stock actuel est quasi nul ──
+    sm['Rotation_12M'] = 0.0
+    m = (sm['Stock_moyen_12M'] > SEUIL) & (sm['S_12M'] > 0)
+    sm.loc[m, 'Rotation_12M'] = (sm.loc[m, 'S_12M'] / sm.loc[m, 'Stock_moyen_12M']).round(2)
 
-    sm['Delai'] = 0.0
-    m = sm['Rotation'] > 0
-    sm.loc[m, 'Delai'] = (365 / sm.loc[m, 'Rotation']).round(0)
+    sm['Rotation_4M'] = 0.0
+    m = (sm['Stock_moyen_4M'] > SEUIL) & (sm['S_4M'] > 0)
+    sm.loc[m, 'Rotation_4M'] = (sm.loc[m, 'S_4M'] / sm.loc[m, 'Stock_moyen_4M']).round(2)
+
+    # ── Tendance de la demande : Moy/Mois 4M vs Moy/Mois 12M ──
+    sm['Tendance_Ratio'] = float('nan')
+    m = sm['Moy_Mois_12M'] > 0
+    sm.loc[m, 'Tendance_Ratio'] = sm.loc[m, 'Moy_Mois_4M'] / sm.loc[m, 'Moy_Mois_12M']
+    sm['Tendance_Pct'] = (sm['Tendance_Ratio'] - 1) * 100
+
+    def _label_tendance(row):
+        ratio, pct = row['Tendance_Ratio'], row['Tendance_Pct']
+        if pd.isna(ratio):
+            return '📈 Hausse (nouvelle activité)' if row['Moy_Mois_4M'] > 0 else '⚪ Aucune demande'
+        if ratio > 1.10:
+            return f'📈 Hausse de la demande ({pct:+.0f}%)'
+        if ratio < 0.90:
+            return f'📉 Baisse de la demande ({pct:+.0f}%)'
+        return f'➡️ Demande stable ({pct:+.0f}%)'
+    sm['Tendance_Label'] = sm.apply(_label_tendance, axis=1)
+
+    # ── Couverture = Stock actuel ÷ Moy/Mois 4M (mesure la tenue face à la demande
+    #    RÉCENTE, pas historique). NaN si aucune sortie sur 4M : la notion de "nombre
+    #    de mois de couverture" n'a pas de sens si rien ne sort — géré via la
+    #    Classification (Dormant / Sans mouvement) plutôt qu'inventé à 0 ou l'infini ──
+    sm['Couverture'] = float('nan')
+    sm.loc[~stock_ok, 'Couverture'] = 0.0
+    m = stock_ok & (sm['Moy_Mois_4M'] > 0)
+    sm.loc[m, 'Couverture'] = (sm.loc[m, 'Stock'] / sm.loc[m, 'Moy_Mois_4M']).round(1)
 
     sm['Taux_Immob'] = 0.0
     m = sm['Couverture'] > 0
     sm.loc[m, 'Taux_Immob'] = (sm.loc[m, 'Couverture'] / 12 * 100).clip(upper=100.0).round(1)
     sm.loc[(~m) & stock_ok, 'Taux_Immob'] = 100.0
 
-    conditions_rupture = sm['Stock'] <= SEUIL
-    conditions_dormant = (~conditions_rupture) & (sm['S_12M'] == 0) & (sm['Total_Sorti'] > 0)
-    conditions_aucun = (~conditions_rupture) & (sm['S_12M'] == 0) & (sm['Total_Sorti'] == 0)
-    conditions_excellent = (~conditions_rupture) & (sm['S_12M'] > 0) & (sm['Taux_Rot'] >= 20)
-    conditions_bon = (~conditions_rupture) & (sm['S_12M'] > 0) & (sm['Taux_Rot'] >= 10) & (sm['Taux_Rot'] < 20)
+    # ── Classification : priorité à la Couverture / au niveau de stock, plus jamais
+    #    une Rotation élevée seule. Un article sans sortie récente (4M) n'est jamais
+    #    classé comme "bon niveau" au seul motif d'une grande couverture. ──
+    cov = sm['Couverture']
+    conditions_rupture = ~stock_ok
+    conditions_sans_mouvement = stock_ok & (sm['S_4M'] == 0) & (sm['Total_Sorti'] == 0)
+    conditions_dormant = stock_ok & (sm['S_4M'] == 0) & (sm['Total_Sorti'] > 0)
+    m_actif = stock_ok & (sm['S_4M'] > 0)
 
-    sm['Class'] = 'Stock élevé'
-    sm.loc[conditions_rupture, 'Class'] = 'Rupture'
+    sm['Class'] = 'Normal'
+    sm.loc[m_actif & (cov < 1), 'Class'] = 'Critique'
+    sm.loc[m_actif & (cov >= 1) & (cov < 3), 'Class'] = 'Stock faible'
+    sm.loc[m_actif & (cov >= 3) & (cov < 6), 'Class'] = 'Normal'
+    sm.loc[m_actif & (cov >= 6) & (cov < 12), 'Class'] = 'Bon niveau'
+    sm.loc[m_actif & (cov >= 12) & (cov < 18), 'Class'] = 'Surstock'
+    sm.loc[m_actif & (cov >= 18), 'Class'] = 'Surstock important'
     sm.loc[conditions_dormant, 'Class'] = 'Dormant'
-    sm.loc[conditions_aucun, 'Class'] = 'Aucun mouvement 12M'
-    sm.loc[conditions_excellent, 'Class'] = 'Excellent'
-    sm.loc[conditions_bon, 'Class'] = 'Bon'
+    sm.loc[conditions_sans_mouvement, 'Class'] = 'Sans mouvement'
+    sm.loc[conditions_rupture, 'Class'] = 'Rupture'
 
     return sm, date_max, date_12m_debut, cols_annuelles
 
@@ -477,6 +578,8 @@ def add_export_buttons(df, basename, sheet_name, date_max):
 
 
 def replenishment_action(couverture):
+    if pd.isna(couverture):
+        return "⚪ Sans sortie récente (4M) — à vérifier"
     if couverture < 1:
         return "🔴 Commander immédiatement"
     if couverture <= 2:
@@ -830,7 +933,7 @@ date_12m_debut = st.session_state["date_12m_debut"]
 
 st.caption(
     f"Analyse réalisée le : {date_max.strftime('%d/%m/%Y')}  |  "
-    f"Fenêtre d'analyse : 12 derniers mois  |  "
+    f"Fenêtre d'analyse : 12 et 4 derniers mois  |  "
     f"Mouvements analysés : {len(df_mv):,}".replace(',', ' ')
 )
 
@@ -866,9 +969,10 @@ if recherche:
           | f['Designation'].astype(str).str.contains(recherche, case=False, na=False)]
 
 CLASS_BADGE = {
-    'Excellent': '🟢 Excellent', 'Bon': '🟢 Bon', 'Stock élevé': '🟡 Stock élevé',
-    'Dormant': '🟠 Dormant', 'Rupture': '🔴 Rupture',
-    'Aucun mouvement 12M': '⚪ Aucun mouvement 12M', 'Aucun mouvement': '⚪ Aucun mouvement',
+    'Rupture': '🔴 Rupture', 'Critique': '🔴 Critique', 'Stock faible': '🟠 Stock faible',
+    'Normal': '🟡 Normal', 'Bon niveau': '🟢 Bon niveau', 'Surstock': '🔵 Surstock',
+    'Surstock important': '⚫ Surstock important / Dormant', 'Dormant': '⚫ Dormant',
+    'Sans mouvement': '📦 Sans mouvement',
 }
 
 def badge_class(series):
@@ -876,33 +980,41 @@ def badge_class(series):
 
 st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=True)
 
-display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois',
-                 'Rotation', 'Taux_Rot', 'Couverture', 'Delai', 'Taux_Immob', 'Dern_Sortie']
+display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class',
+                 'S_12M', 'Moy_Mois_12M', 'S_4M', 'Moy_Mois_4M',
+                 'Rotation_12M', 'Rotation_4M', 'Tendance_Label',
+                 'Couverture', 'Taux_Immob', 'Dern_Sortie']
 rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
-               'S_12M': 'Sorties 12M', 'Moy_Mois': 'Moy/Mois', 'Taux_Rot': 'Taux Rot. (%)',
-               'Couverture': 'Couv. (mois)', 'Delai': 'Délai (j)', 'Taux_Immob': 'Immob. (%)',
+               'S_12M': 'Sorties 12M', 'Moy_Mois_12M': 'Moy/Mois 12M',
+               'S_4M': 'Sorties 4M', 'Moy_Mois_4M': 'Moy/Mois 4M',
+               'Rotation_12M': 'Rotation 12M', 'Rotation_4M': 'Rotation 4M',
+               'Tendance_Label': 'Tendance 4M vs 12M',
+               'Couverture': 'Couv. (mois)', 'Taux_Immob': 'Immob. (%)',
                'Dern_Sortie': 'Dern. Sortie'}
 
 if page == "📦 Réapprovisionnement":
     st.caption("Aide à la décision : articles nécessitant une commande selon leur couverture. Le CUMP n'est pas utilisé.")
     rep = f.copy()
     rep['Action'] = rep['Couverture'].apply(replenishment_action)
-    rep['Priorité'] = rep['Couverture'].apply(lambda v: '🔴 Articles critiques' if v < 1 else ('🟠 Réapprovisionnement conseillé' if v <= 2 else '🟢 Stock suffisant'))
-    kc1, kc2, kc3 = st.columns(3)
+    rep['Priorité'] = rep['Couverture'].apply(
+        lambda v: '⚪ Sans sortie récente (4M)' if pd.isna(v) else
+        ('🔴 Articles critiques' if v < 1 else ('🟠 Réapprovisionnement conseillé' if v <= 2 else '🟢 Stock suffisant')))
+    kc1, kc2, kc3, kc4 = st.columns(4)
     filters = {
         '🔴 Articles critiques': rep[rep['Couverture'] < 1],
         '🟠 Réapprovisionnement conseillé': rep[(rep['Couverture'] >= 1) & (rep['Couverture'] <= 2)],
         '🟢 Stock suffisant': rep[rep['Couverture'] > 2],
+        '⚪ Sans sortie récente (4M)': rep[rep['Couverture'].isna()],
     }
-    for col, label in zip([kc1, kc2, kc3], filters):
+    for col, label in zip([kc1, kc2, kc3, kc4], filters):
         if col.button(f"{label}\n\n{len(filters[label])} article(s)", use_container_width=True):
             st.session_state['reappro_filter'] = label
     selected_priority = st.session_state.get('reappro_filter')
     if selected_priority:
         st.info(f"Filtre actif : {selected_priority}")
         rep = filters[selected_priority]
-    rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Rotation', 'Couverture', 'Class', 'Action']
-    rep_df = rep[rep_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)'})
+    rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Rotation_12M', 'Couverture', 'Class', 'Action']
+    rep_df = rep[rep_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)', 'Rotation_12M': 'Rotation 12M'})
     rep_df['Classification'] = badge_class(rep_df['Classification'])
     add_export_buttons(rep_df, 'reapprovisionnement', 'Réapprovisionnement', date_max)
     st.dataframe(rep_df.sort_values('Couverture (mois)'), use_container_width=True, height=520)
@@ -934,10 +1046,10 @@ if page == "🪵 Stock Bois Rouge":
 
 if page == "⚠️ Alertes":
     st.caption("Articles en rupture et articles dormants — mêmes filtres que l'analyse courante.")
-    alert_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Dern_Sortie']
-    alert_df = f[f['Class'].isin(['Rupture', 'Dormant'])][alert_cols].rename(columns={
+    alert_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'S_4M', 'Dern_Sortie']
+    alert_df = f[f['Class'].isin(['Rupture', 'Critique', 'Dormant', 'Sans mouvement'])][alert_cols].rename(columns={
         'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité',
-        'Class': 'Classification', 'S_12M': 'Sorties 12M', 'Dern_Sortie': 'Dern. Sortie'
+        'Class': 'Classification', 'S_12M': 'Sorties 12M', 'S_4M': 'Sorties 4M', 'Dern_Sortie': 'Dern. Sortie'
     })
     if 'Classification' in alert_df.columns:
         alert_df['Classification'] = badge_class(alert_df['Classification']) if 'badge_class' in globals() else alert_df['Classification']
@@ -946,8 +1058,9 @@ if page == "⚠️ Alertes":
 
 if page == "📄 Rapports":
     st.caption("Exports disponibles pour la vue filtrée courante.")
-    report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois', 'Rotation']
-    report_df = f[report_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification'})
+    report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois_12M',
+                   'S_4M', 'Moy_Mois_4M', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label']
+    report_df = f[report_cols].rename(columns=rename_cols)
     add_export_buttons(report_df, 'rapport_rotation', 'Rapport Rotation', date_max)
     st.dataframe(report_df, use_container_width=True, height=460)
     st.stop()
@@ -965,14 +1078,16 @@ volume_stock_html = "<br>".join(
     f"{format_nombre_fr(row.Stock)} {row.Unite_Affichage}"
     for row in stock_par_unite.itertuples(index=False)
 ) or "—"
-# Rotation globale pondérée = total sorties 12M / total stock (plus robuste que la
-# moyenne simple des ratios individuels, qui explose si une référence a un stock
-# quasi nul avec des sorties non nulles)
-_base_rot = f[f['Rotation'] > 0]
-rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock'].sum() if _base_rot['Stock'].sum() > 0 else float('nan')
+# Rotation globale pondérée = total sorties 12M / total STOCK MOYEN 12M (plus robuste
+# que la moyenne simple des ratios individuels, et n'explose plus si une référence a un
+# stock actuel quasi nul avec des sorties non nulles, puisqu'on divise par le stock
+# moyen réel de la période et non par le stock instantané)
+_base_rot = f[f['Rotation_12M'] > 0]
+rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock_moyen_12M'].sum() if _base_rot['Stock_moyen_12M'].sum() > 0 else float('nan')
 n_rupture = len(f[f['Class'] == 'Rupture'])
-n_dormant = len(f[f['Class'] == 'Dormant'])
-n_alertes = n_rupture + n_dormant
+n_critique = len(f[f['Class'] == 'Critique'])
+n_dormant = len(f[f['Class'].isin(['Dormant', 'Sans mouvement'])])
+n_alertes = n_rupture + n_critique + n_dormant
 
 k1, k2, k3, k4 = st.columns(4)
 with k1:
@@ -984,16 +1099,17 @@ with k2:
     st.metric(
         "Rotation du stock",
         f"{rot_moy:.2f} tours/an" if pd.notna(rot_moy) else "—",
-        help="Nombre moyen de renouvellements du stock sur les 12 derniers mois.")
+        help="Sorties des 12 derniers mois rapportées au STOCK MOYEN réel de la période (et non au stock instantané).")
     st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois</div>", unsafe_allow_html=True)
 with k3:
     st.metric(
         "⚠️ Alertes",
         "Articles nécessitant une action",
-        help="Les alertes regroupent les articles en rupture de stock ainsi que les articles sans mouvement depuis plus de 12 mois.")
+        help="Regroupe les ruptures de stock, les articles en couverture critique (<1 mois) et les articles sans sortie récente (Dormant / Sans mouvement).")
     st.markdown(
         f"<div class='woodmat-kpi-detail'>Rupture : {n_rupture}<br>"
-        f"Dormant : {n_dormant}<br><strong>Total : {n_alertes}</strong></div>",
+        f"Critique : {n_critique}<br>"
+        f"Dormant / Sans mouvement : {n_dormant}<br><strong>Total : {n_alertes}</strong></div>",
         unsafe_allow_html=True)
 with k4:
     st.metric("Articles analysés (références)", len(f))
@@ -1027,12 +1143,15 @@ with tcol:
     st.markdown(
         """
         <div class='woodmat-legend'>
-        <strong>Excellent</strong> → Rotation très élevée.<br>
-        <strong>Bon</strong> → Rotation satisfaisante.<br>
-        <strong>Stock élevé</strong> → Stock supérieur au besoin.<br>
-        <strong>Dormant</strong> → Aucun mouvement depuis plus de 12 mois.<br>
         <strong>Rupture</strong> → Stock nul.<br>
-        <strong>Aucun mouvement 12M</strong> → Aucune sortie enregistrée durant les 12 derniers mois.
+        <strong>Critique</strong> → Couverture &lt; 1 mois face à la demande récente (4M).<br>
+        <strong>Stock faible</strong> → Couverture entre 1 et 3 mois.<br>
+        <strong>Normal</strong> → Couverture entre 3 et 6 mois.<br>
+        <strong>Bon niveau</strong> → Couverture entre 6 et 12 mois.<br>
+        <strong>Surstock</strong> → Couverture entre 12 et 18 mois.<br>
+        <strong>Surstock important / Dormant</strong> → Couverture ≥ 18 mois.<br>
+        <strong>Dormant</strong> → Déjà vendu par le passé mais aucune sortie sur les 4 derniers mois.<br>
+        <strong>Sans mouvement</strong> → Aucune sortie enregistrée depuis l'origine de l'historique.
         </div>
         """,
         unsafe_allow_html=True)
@@ -1044,7 +1163,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", 
                                     "🪵 Stock Bois Rouge"])
 
 with tab1:
-    tdf = f[display_cols].rename(columns=rename_cols).sort_values('Taux Rot. (%)', ascending=False)
+    tdf = f[display_cols].rename(columns=rename_cols).sort_values('Rotation 12M', ascending=False)
     tdf['Classification'] = badge_class(tdf['Classification'])
     st.dataframe(tdf, use_container_width=True, height=480)
 
@@ -1058,7 +1177,7 @@ with tab1:
 with tab2:
     dorm = f[f['Class'] == 'Dormant'][display_cols].rename(columns=rename_cols)
     dorm['Classification'] = badge_class(dorm['Classification'])
-    st.caption(f"{len(dorm)} référence(s) dormante(s) — plus de mouvement de sortie sur 12 mois glissants "
+    st.caption(f"{len(dorm)} référence(s) dormante(s) — aucune sortie sur les 4 derniers mois "
                f"mais historique de sorties existant.")
     st.dataframe(dorm.sort_values('Immob. (%)', ascending=False),
                  use_container_width=True, height=420)
