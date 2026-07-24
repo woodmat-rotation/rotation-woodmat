@@ -1078,12 +1078,17 @@ volume_stock_html = "<br>".join(
     f"{format_nombre_fr(row.Stock)} {row.Unite_Affichage}"
     for row in stock_par_unite.itertuples(index=False)
 ) or "—"
-# Rotation globale pondérée = total sorties 12M / total STOCK MOYEN 12M (plus robuste
-# que la moyenne simple des ratios individuels, et n'explose plus si une référence a un
-# stock actuel quasi nul avec des sorties non nulles, puisqu'on divise par le stock
-# moyen réel de la période et non par le stock instantané)
+# KPI historique — formule d'origine INCHANGÉE (continuité avec les anciens rapports)
 _base_rot = f[f['Rotation_12M'] > 0]
-rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock_moyen_12M'].sum() if _base_rot['Stock_moyen_12M'].sum() > 0 else float('nan')
+rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock'].sum() if _base_rot['Stock'].sum() > 0 else float('nan')
+
+# Nouveau KPI, séparé : Rotation globale 12M sur stock moyen global (ne remplace pas rot_moy)
+rot_globale_12m = _base_rot['S_12M'].sum() / _base_rot['Stock_moyen_12M'].sum() if _base_rot['Stock_moyen_12M'].sum() > 0 else float('nan')
+
+# Nouveau KPI, séparé : Rotation globale 4M sur stock moyen global 4M (jamais mélangé au 12M)
+_base_rot4 = f[f['Rotation_4M'] > 0]
+rot_globale_4m = _base_rot4['S_4M'].sum() / _base_rot4['Stock_moyen_4M'].sum() if _base_rot4['Stock_moyen_4M'].sum() > 0 else float('nan')
+
 n_rupture = len(f[f['Class'] == 'Rupture'])
 n_critique = len(f[f['Class'] == 'Critique'])
 n_dormant = len(f[f['Class'].isin(['Dormant', 'Sans mouvement'])])
@@ -1099,8 +1104,19 @@ with k2:
     st.metric(
         "Rotation du stock",
         f"{rot_moy:.2f} tours/an" if pd.notna(rot_moy) else "—",
-        help="Sorties des 12 derniers mois rapportées au STOCK MOYEN réel de la période (et non au stock instantané).")
-    st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois</div>", unsafe_allow_html=True)
+        help="KPI historique (formule d'origine, inchangée) : Sorties 12M ÷ Stock ACTUEL total de la catégorie.")
+    st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois — stock actuel</div>", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric(
+            "Rotation globale 12M (stock moyen)",
+            f"{rot_globale_12m:.2f} tours/an" if pd.notna(rot_globale_12m) else "—",
+            help="Sorties 12M ÷ Stock MOYEN reconstruit sur 12 mois (méthode différente du KPI historique ci-dessus — ne le remplace pas).")
+    with c2:
+        st.metric(
+            "Rotation globale 4M (stock moyen)",
+            f"{rot_globale_4m:.2f} tours/an" if pd.notna(rot_globale_4m) else "—",
+            help="Sorties 4M ÷ Stock MOYEN reconstruit sur 4 mois. Aucune donnée 12M n'entre dans ce calcul.")
 with k3:
     st.metric(
         "⚠️ Alertes",
