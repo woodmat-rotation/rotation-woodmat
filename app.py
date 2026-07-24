@@ -443,8 +443,16 @@ def calculer_indicateurs(df_mv, df_st_bytes):
     sm['Moy_Mois_12M'] = (sm['S_12M'] / 12.0).round(3)
     sm['Moy_Mois_4M'] = (sm['S_4M'] / 4.0).round(3)
 
-    # ── Rotation 12M et 4M = Sorties ÷ STOCK MOYEN de la période (plus jamais le stock
-    #    actuel), ce qui évite l'explosion du ratio quand le stock actuel est quasi nul ──
+    # ── Rotation actuelle = Sorties 12M ÷ Stock ACTUEL (même formule que le KPI
+    #    Dashboard, au niveau article). Sert de repère "vue instantanée" à côté de la
+    #    Rotation 12M historique — les deux sont affichées séparément, jamais fondues. ──
+    sm['Rotation_Actuelle'] = 0.0
+    m = stock_ok & (sm['S_12M'] > 0)
+    sm.loc[m, 'Rotation_Actuelle'] = (sm.loc[m, 'S_12M'] / sm.loc[m, 'Stock']).round(2)
+
+    # ── Rotation 12M et 4M HISTORIQUES = Sorties ÷ STOCK MOYEN de la période (pas le
+    #    stock actuel), ce qui évite l'explosion du ratio quand le stock actuel est
+    #    quasi nul. Indicateur analytique — ne pilote jamais seul la Classification. ──
     sm['Rotation_12M'] = 0.0
     m = (sm['Stock_moyen_12M'] > SEUIL) & (sm['S_12M'] > 0)
     sm.loc[m, 'Rotation_12M'] = (sm.loc[m, 'S_12M'] / sm.loc[m, 'Stock_moyen_12M']).round(2)
@@ -982,12 +990,13 @@ st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=Tru
 
 display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class',
                  'S_12M', 'Moy_Mois_12M', 'S_4M', 'Moy_Mois_4M',
-                 'Rotation_12M', 'Rotation_4M', 'Tendance_Label',
+                 'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label',
                  'Couverture', 'Taux_Immob', 'Dern_Sortie']
 rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
                'S_12M': 'Sorties 12M', 'Moy_Mois_12M': 'Moy/Mois 12M',
                'S_4M': 'Sorties 4M', 'Moy_Mois_4M': 'Moy/Mois 4M',
-               'Rotation_12M': 'Rotation 12M', 'Rotation_4M': 'Rotation 4M',
+               'Rotation_Actuelle': 'Rotation actuelle', 'Rotation_12M': 'Rotation 12M historique',
+               'Rotation_4M': 'Rotation 4M',
                'Tendance_Label': 'Tendance 4M vs 12M',
                'Couverture': 'Couv. (mois)', 'Taux_Immob': 'Immob. (%)',
                'Dern_Sortie': 'Dern. Sortie'}
@@ -1014,7 +1023,7 @@ if page == "📦 Réapprovisionnement":
         st.info(f"Filtre actif : {selected_priority}")
         rep = filters[selected_priority]
     rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Rotation_12M', 'Couverture', 'Class', 'Action']
-    rep_df = rep[rep_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)', 'Rotation_12M': 'Rotation 12M'})
+    rep_df = rep[rep_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)', 'Rotation_12M': 'Rotation 12M historique'})
     rep_df['Classification'] = badge_class(rep_df['Classification'])
     add_export_buttons(rep_df, 'reapprovisionnement', 'Réapprovisionnement', date_max)
     st.dataframe(rep_df.sort_values('Couverture (mois)'), use_container_width=True, height=520)
@@ -1059,7 +1068,7 @@ if page == "⚠️ Alertes":
 if page == "📄 Rapports":
     st.caption("Exports disponibles pour la vue filtrée courante.")
     report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois_12M',
-                   'S_4M', 'Moy_Mois_4M', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label']
+                   'S_4M', 'Moy_Mois_4M', 'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label']
     report_df = f[report_cols].rename(columns=rename_cols)
     add_export_buttons(report_df, 'rapport_rotation', 'Rapport Rotation', date_max)
     st.dataframe(report_df, use_container_width=True, height=460)
@@ -1104,19 +1113,8 @@ with k2:
     st.metric(
         "Rotation du stock",
         f"{rot_moy:.2f} tours/an" if pd.notna(rot_moy) else "—",
-        help="KPI historique (formule d'origine, inchangée) : Sorties 12M ÷ Stock ACTUEL total de la catégorie.")
+        help="Sorties des 12 derniers mois ÷ Stock ACTUEL total de la catégorie. KPI de référence du Dashboard — inchangé.")
     st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois — stock actuel</div>", unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric(
-            "Rotation globale 12M (stock moyen)",
-            f"{rot_globale_12m:.2f} tours/an" if pd.notna(rot_globale_12m) else "—",
-            help="Sorties 12M ÷ Stock MOYEN reconstruit sur 12 mois (méthode différente du KPI historique ci-dessus — ne le remplace pas).")
-    with c2:
-        st.metric(
-            "Rotation globale 4M (stock moyen)",
-            f"{rot_globale_4m:.2f} tours/an" if pd.notna(rot_globale_4m) else "—",
-            help="Sorties 4M ÷ Stock MOYEN reconstruit sur 4 mois. Aucune donnée 12M n'entre dans ce calcul.")
 with k3:
     st.metric(
         "⚠️ Alertes",
@@ -1179,7 +1177,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📋 Tableau complet", "😴 Stock dormant", 
                                     "🪵 Stock Bois Rouge"])
 
 with tab1:
-    tdf = f[display_cols].rename(columns=rename_cols).sort_values('Rotation 12M', ascending=False)
+    tdf = f[display_cols].rename(columns=rename_cols).sort_values('Rotation actuelle', ascending=False)
     tdf['Classification'] = badge_class(tdf['Classification'])
     st.dataframe(tdf, use_container_width=True, height=480)
 
