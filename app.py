@@ -10,7 +10,7 @@ import secrets
 import warnings
 warnings.filterwarnings('ignore')
 
-# ============================================================
+# ================================a+============================
 # WOODMAT — ROTATION DU STOCK (Web App)
 # ============================================================
 
@@ -1088,7 +1088,16 @@ volume_stock_html = "<br>".join(
     for row in stock_par_unite.itertuples(index=False)
 ) or "—"
 # KPI historique — formule d'origine INCHANGÉE (continuité avec les anciens rapports)
-_base_rot = f[f['Rotation_12M'] > 0]
+# Calcul retenu (Dashboard "Rotation du stock") :
+#   Rotation globale = (Somme des Sorties 12M) ÷ (Somme du Stock ACTUEL)
+# Justification : le KPI Dashboard doit rester la vue agrégée "Sorties 12M ÷ Stock ACTUEL".
+# Remarque importante : on inclut ici l'ensemble des articles disposant d'un stock
+# significatif (> SEUIL) pour éviter d'exclure involontairement des références
+# dont le stock actuel est non nul (exclusion précédente sur 'Rotation_12M>0' pouvait
+# retirer des articles avec sorties mais stock moyen recalculé à zéro, faussant le ratio).
+# Ne pas confondre avec les KPI analytiques `rot_globale_12m` (stock moyen) ou
+# `Rotation_12M` / `Rotation_Actuelle` individuels qui restent calculés séparément.
+_base_rot = f[f['Stock'] > SEUIL]
 rot_moy = _base_rot['S_12M'].sum() / _base_rot['Stock'].sum() if _base_rot['Stock'].sum() > 0 else float('nan')
 
 # Nouveau KPI, séparé : Rotation globale 12M sur stock moyen global (ne remplace pas rot_moy)
@@ -1255,3 +1264,4 @@ with tab4:
                                 file_name=f"stock_bois_rouge_{date_max.strftime('%d_%m_%Y')}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 type="primary")
+
