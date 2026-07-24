@@ -926,8 +926,254 @@ if page == "📚 Historique":
 
 if page == "📈 Analyses":
     st.markdown("<h2 class='woodmat-page-title'>Analyses</h2>", unsafe_allow_html=True)
-    st.markdown("<div class='woodmat-coming-soon'>Ce module est prêt à accueillir les prochaines analyses métier.</div>", unsafe_allow_html=True)
-    st.stop()
+
+    # Basic checks and helpful debug messages if data is missing
+    if sm is None or sm.empty:
+        st.warning("Données d'analyse manquantes — générez d'abord l'analyse en important le stock actuel (et mouvements si nécessaire).")
+        st.stop()
+
+    df_mv = st.session_state.get('df_mv')
+    date_max = st.session_state.get('date_max')
+    date_12m_debut = st.session_state.get('date_12m_debut')
+
+    if df_mv is None or df_mv.empty:
+        st.warning("La base de mouvements est vide — impossible de calculer les analyses ABC/XYZ.")
+        st.stop()
+
+    st.markdown("<div class='woodmat-muted'>Module d'analyses métier — ABC, XYZ, Matrice, Pareto, TOP/FLOP, par catégorie, évolution et synthèse.</div>", unsafe_allow_html=True)
+
+    # Ensure we have unit price if available in the original stock raw file
+    df_st_raw = st.session_state.get('df_st_raw')
+    price_available = False
+    price_series = None
+    if df_st_raw is not None:
+        # detect candidate price column
+        price_cols = [c for c in df_st_raw.columns if any(k in str(c).upper() for k in ['PU', 'PRIX', 'PRICE', 'PU_HT'])]
+        if price_cols:
+            pc = price_cols[0]
+            try:
+                df_st_raw['_PU'] = pd.to_numeric(df_st_raw[pc], errors='coerce')
+                price_series = df_st_raw.groupby('Référence')['_PU'].median()
+                price_available = True
+            except Exception:
+                price_available = False
+
+    # Prepare base dataframe for analyses
+    ana = sm.copy()
+    ana['Valeur_12M'] = ana['S_12M'] * (ana.get('PU_HT', 0) if 'PU_HT' in ana.columns else 0)
+    if price_available and price_series is not None:
+        ana = ana.set_index('Référence')
+        ana['PU_detected'] = price_series
+        ana['Valeur_12M'] = ana['S_12M'] * ana['PU_detected'].fillna(0)
+        ana = ana.reset_index()
+        missing_price = ana['PU_detected'].isna().sum()
+    else:
+        # fallback: use S_12M as proxy for value (documented limitation)
+        ana['PU_detected'] = float('nan')
+        ana['Valeur_12M'] = ana['S_12M']
+        missing_price = len(ana)
+
+    # tabs
+    tab_abc, tab_xyz, tab_matrix, tab_pareto, tab_topflop, tab_cat, tab_evo, tab_synth = st.tabs([
+        "Analyse ABC", "Analyse XYZ", "Matrice ABC/XYZ", "Pareto", "TOP / FLOP", "Par catégorie", "Évolution mensuelle", "Dashboard synthétique"
+    ])
+
+    # ---------- ABC ----------
+    with tab_abc:
+        st.markdown("### Analyse ABC")
+        if not price_available:
+            st.info("Prix unitaire non détecté — utilisation des Sorties 12M comme proxy de valeur. (Donnée manquante)")
+        df_abc = ana[['Référence', 'Designation', 'Cat', 'S_12M', 'Valeur_12M']].copy()
+        df_abc = df_abc.sort_values('Valeur_12M', ascending=False)
+        total_value = df_abc['Valeur_12M'].sum()
+        df_abc['Cumul'] = df_abc['Valeur_12M'].cumsum()
+        df_abc['Cumul_pct'] = df_abc['Cumul'] / total_value.replace({0:1})
+        def abc_class(v):
+            if v <= 0.80:
+                return 'A'
+            if v <= 0.95:
+                return 'B'
+            return 'C'
+        df_abc['Classe_ABC'] = df_abc['Cumul_pct'].apply(abc_class)
+        counts = df_abc['Classe_ABC'].value_counts().reindex(['A','B','C']).fillna(0).astype(int)
+        pct_refs = (counts / len(df_abc) * 100).round(1)
+        val_pct = df_abc.groupby('Classe_ABC')['Valeur_12M'].sum().reindex(['A','B','C']).fillna(0)
+        val_pct = (val_pct / total_value.replace({0:1}) * 100).round(1)
+        st.markdown(f"Références total : **{len(df_abc)}**")
+        st.write(pd.DataFrame({
+            'Nb références': counts,
+            '% références': pct_refs,
+            '% valeur': val_pct
+        }))
+        add_export_buttons(df_abc, 'analyse_abc_table', 'ABC détaillé', date_max)
+        st.dataframe(df_abc.rename(columns={'Designation':'Désignation','Cat':'Catégorie','S_12M':'Sorties 12M','Valeur_12M':'Valeur 12M'}), use_container_width=True, height=420)
+        # Pareto chart
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=df_abc['Référence'], y=df_abc['Valeur_12M'], name='Valeur 12M'))
+        fig.add_trace(go.Scatter(x=df_abc['Référence'], y=(df_abc['Cumul_pct']*100), name='Cumul %', yaxis='y2'))
+        fig.update_layout(yaxis2=dict(overlaying='y', side='right', range=[0,100]), height=420, margin=dict(l=10,r=10,t=20,b=120))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ---------- XYZ ----------
+    with tab_xyz:
+        st.markdown("### Analyse XYZ — régularité de la demande")
+        s_all = df_mv[df_mv['ES']=='S']
+        # monthly series for last 12 months
+        s_12m = s_all[(s_all['Date'] >= date_12m_debut) & (s_all['Date'] <= date_max)].copy()
+        s_12m['Mois'] = s_12m['Date'].dt.to_period('M').dt.to_timestamp()
+        piv = s_12m.pivot_table(index='Référence', columns='Mois', values='Qty', aggfunc='sum', fill_value=0)
+        # ensure 12 months columns present
+        months = pd.date_range(date_12m_debut.normalize(), periods=12, freq='MS')
+        for m in months:
+            if m not in piv.columns:
+                piv[m] = 0
+        piv = piv[sorted(piv.columns)]
+        stats = []
+        for ref, row in piv.iterrows():
+            vals = row.values.astype(float)
+            mean = vals.mean()
+            std = vals.std(ddof=0)
+            if mean == 0:
+                cv = float('inf')
+            else:
+                cv = std / mean
+            stats.append((ref, mean, std, cv))
+        df_xyz = pd.DataFrame(stats, columns=['Référence', 'Moy_Mois', 'Std_Mois', 'CV'])
+        # classify
+        def xyz_label(r):
+            if r['Moy_Mois'] == 0:
+                return 'Z / Sans demande'
+            cv = r['CV']
+            if cv <= 0.5:
+                return 'X'
+            if cv <= 1.0:
+                return 'Y'
+            return 'Z'
+        df_xyz['Classe_XYZ'] = df_xyz.apply(xyz_label, axis=1)
+        counts_xyz = df_xyz['Classe_XYZ'].value_counts().reindex(['X','Y','Z','Z / Sans demande']).fillna(0).astype(int)
+        st.write(pd.DataFrame({'Nb références': counts_xyz}))
+        # merge for detailed table
+        df_xyz = df_xyz.merge(ana[['Référence','Designation','Cat','S_12M','S_4M']], on='Référence', how='left')
+        add_export_buttons(df_xyz, 'analyse_xyz_table', 'XYZ détaillé', date_max)
+        st.dataframe(df_xyz.sort_values(['Classe_XYZ','CV']), use_container_width=True, height=420)
+
+    # ---------- ABC x XYZ matrix ----------
+    with tab_matrix:
+        st.markdown("### Matrice ABC × XYZ")
+        merged = df_abc[['Référence','Classe_ABC']].merge(df_xyz[['Référence','Classe_XYZ']], on='Référence', how='inner')
+        matrix = pd.crosstab(merged['Classe_ABC'], merged['Classe_XYZ'])
+        st.dataframe(matrix, use_container_width=True)
+        # interpretations
+        interpretations = {
+            'AX': 'Priorité maximale, demande importante et régulière',
+            'AY': 'Importante mais variable',
+            'AZ': 'Importante mais très irrégulière, gestion prudente',
+            'BX': 'Gestion standard', 'BY': 'Gestion standard', 'BZ': 'Surveillance',
+            'CX': 'Faible priorité', 'CY': 'Faible priorité', 'CZ': 'Faible valeur et demande irrégulière / potentiellement dormant'
+        }
+        st.markdown("**Interprétation automatique (exemples)**")
+        for k,v in interpretations.items():
+            st.markdown(f"- **{k}** → {v}")
+
+    # ---------- Pareto ----------
+    with tab_pareto:
+        st.markdown("### Pareto — valeur cumulée")
+        cats = sorted(ana['Cat'].dropna().unique())
+        choice = st.selectbox("Filtrer par catégorie", options=['Toutes'] + cats)
+        dfp = ana.copy()
+        if choice != 'Toutes':
+            dfp = dfp[dfp['Cat'] == choice]
+        dfp = dfp.sort_values('Valeur_12M', ascending=False)
+        dfp['Cumul'] = dfp['Valeur_12M'].cumsum()
+        total = dfp['Valeur_12M'].sum()
+        dfp['Cumul_pct'] = dfp['Cumul'] / total.replace({0:1})
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=dfp['Référence'], y=dfp['Valeur_12M'], name='Valeur'))
+        fig.add_trace(go.Scatter(x=dfp['Référence'], y=dfp['Cumul_pct']*100, name='Cumul %', yaxis='y2'))
+        fig.add_hline(y=80, line_dash='dash', line_color='green')
+        fig.add_hline(y=95, line_dash='dash', line_color='orange')
+        fig.update_layout(yaxis2=dict(overlaying='y', side='right', range=[0,100]), height=420, margin=dict(b=120))
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(dfp[['Référence','S_12M','Valeur_12M','Cumul_pct']], 'pareto', 'Pareto', date_max)
+
+    # ---------- TOP / FLOP ----------
+    with tab_topflop:
+        st.markdown("### TOP / FLOP — synthèse")
+        # TOP lists
+        top_s12 = ana.sort_values('S_12M', ascending=False).head(10)[['Référence','Designation','Cat','S_12M','S_4M','Rotation_Actuelle','Rotation_12M']]
+        top_s4 = ana.sort_values('S_4M', ascending=False).head(10)[['Référence','Designation','Cat','S_12M','S_4M','Rotation_Actuelle','Rotation_12M']]
+        top_rot = ana.sort_values('Rotation_Actuelle', ascending=False).head(10)[['Référence','Designation','Cat','Rotation_Actuelle','S_12M','Stock']]
+        st.markdown('#### 🔥 TOP références (Sorties 12M)')
+        st.dataframe(top_s12, use_container_width=True)
+        st.markdown('#### 🔥 TOP références (Sorties 4M)')
+        st.dataframe(top_s4, use_container_width=True)
+        st.markdown('#### 🔥 TOP références (Rotation actuelle)')
+        st.dataframe(top_rot, use_container_width=True)
+
+        # FLOP heuristic: faible sortie 12M (bottom 20%), stock élevé (top 30%), couverture élevée
+        thr_low = ana['S_12M'].quantile(0.20)
+        thr_stock_high = ana['Stock'].quantile(0.70)
+        flop = ana[(ana['S_12M'] <= thr_low) & (ana['Stock'] >= thr_stock_high)].copy()
+        flop = flop[['Référence','Designation','Cat','S_12M','Stock','Couverture','Taux_Immob','Dern_Sortie']].sort_values(['S_12M','Stock'], ascending=[True,False]).head(50)
+        st.markdown('#### ⚠️ FLOP (heuristique)')
+        st.dataframe(flop, use_container_width=True)
+
+    # ---------- Par catégorie ----------
+    with tab_cat:
+        st.markdown('### Analyse par catégorie')
+        grp = ana.groupby('Cat').agg(
+            Nb_ref=('Référence','nunique'),
+            Stock_total=('Stock','sum'),
+            Sorties_12M=('S_12M','sum'),
+            Moy_Mois_12M=('Moy_Mois_12M','mean'),
+            Sorties_4M=('S_4M','sum'),
+            Moy_Mois_4M=('Moy_Mois_4M','mean'),
+            Rotation_actuelle_glob=('Rotation_Actuelle','mean'),
+            Couverture_moy=('Couverture','mean'),
+            Immob_moy=('Taux_Immob','mean'),
+            Dormant=('Class', lambda s: (s=='Dormant').sum()),
+            A_risque_rupture=('Couverture', lambda s: (s <= 1).sum())
+        ).reset_index()
+        st.dataframe(grp, use_container_width=True)
+        add_export_buttons(grp, 'analyse_par_categorie', 'Par catégorie', date_max)
+
+    # ---------- Évolution mensuelle ----------
+    with tab_evo:
+        st.markdown('### Évolution mensuelle (12 derniers mois)')
+        refs_filter = st.selectbox('Filtrer par référence (optionnel)', options=['Toutes'] + sorted(ana['Référence'].astype(str).unique()))
+        cats_filter = st.selectbox('Filtrer par catégorie', options=['Toutes'] + sorted(ana['Cat'].dropna().unique()))
+        evo_df = evolution_mensuelle(df_mv, None)
+        if refs_filter != 'Toutes':
+            evo_df = evolution_mensuelle(df_mv, [refs_filter])
+        if cats_filter != 'Toutes':
+            refs_in_cat = ana[ana['Cat']==cats_filter]['Référence'].tolist()
+            evo_df = evolution_mensuelle(df_mv, refs_in_cat)
+        evo_df = evo_df.sort_values('Mois')
+        evo_df['MA3'] = evo_df['Qty'].rolling(3, min_periods=1).mean()
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=evo_df['Mois'], y=evo_df['Qty'], name='Sorties mensuelles'))
+        fig.add_trace(go.Line(x=evo_df['Mois'], y=evo_df['MA3'], name='Moyenne mobile 3M'))
+        st.plotly_chart(fig, use_container_width=True)
+        add_export_buttons(evo_df, 'evolution_mensuelle', 'Évolution mensuelle', date_max)
+
+    # ---------- Dashboard synthétique ----------
+    with tab_synth:
+        st.markdown('### Dashboard synthétique')
+        total_refs = ana['Référence'].nunique()
+        n_abc_a = df_abc[df_abc['Classe_ABC']=='A']['Référence'].nunique()
+        n_xyz_z = df_xyz[df_xyz['Classe_XYZ'].str.startswith('Z')]['Référence'].nunique()
+        n_ax = merged[(merged['Classe_ABC']=='A') & (merged['Classe_XYZ'].str.startswith('X'))]['Référence'].nunique()
+        n_rupture = int((ana['Class']=='Rupture').sum())
+        n_sous_seuil = int((ana['Couverture'] <= 1).sum())
+        n_dormant = int((ana['Class']=='Dormant').sum())
+        immobilise = (ana['Stock'] * ana.get('CUMP', 0)).sum() if 'CUMP' in ana.columns else ana['Stock'].sum()
+        st.write({'Total références': total_refs, 'ABC-A': n_abc_a, 'XYZ-Z': n_xyz_z, 'AX': n_ax, 'Rupture': n_rupture, 'Sous seuil': n_sous_seuil, 'Dormant': n_dormant, 'Stock immobilisé (proxy)': immobilise})
+        st.markdown('#### TOP 10 (Sorties 12M)')
+        st.dataframe(ana.sort_values('S_12M', ascending=False).head(10)[['Référence','Designation','Cat','S_12M','Stock']], use_container_width=True)
+        st.markdown('#### FLOP 10 (heuristique)')
+        st.dataframe(flop.head(10), use_container_width=True)
+
+    st.success('Analyses générées à partir des données chargées.')
 
 if sm is None:
     st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=True)
@@ -1264,4 +1510,3 @@ with tab4:
                                 file_name=f"stock_bois_rouge_{date_max.strftime('%d_%m_%Y')}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 type="primary")
-
