@@ -827,7 +827,7 @@ if not os.path.exists(BASE_HISTORIQUE):
 inject_global_styles()
 
 MENU_ITEMS = [
-    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚠️ Alertes",
+    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚙️ Paramètres", "⚠️ Alertes",
     "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"
 ]
 if user_can_manage_users():
@@ -844,7 +844,8 @@ with st.sidebar:
     f_mouv = None
     f_stock = None
     lancer = False
-    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚠️ Alertes", "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"]:
+    # Show uploaders only on pages that need data imports/analysis generation.
+    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"]:
         st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
         f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
 
@@ -915,6 +916,90 @@ if page == "👥 Gestion des utilisateurs":
     render_user_management()
     st.stop()
 
+if page == "⚙️ Paramètres":
+    st.markdown("<h2 class='woodmat-page-title'>⚙️ Paramètres</h2>", unsafe_allow_html=True)
+    params_file = os.path.join(APP_DIR, "parametres_stock.json")
+
+    def load_params():
+        if os.path.exists(params_file):
+            try:
+                with open(params_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    params = load_params()
+
+    # categories detected from last analysis or from raw stock
+    df_st_raw = st.session_state.get('df_st_raw')
+    if st.session_state.get('sm') is not None:
+        cats = sorted(st.session_state['sm']['Cat'].dropna().unique())
+    elif df_st_raw is not None and 'Catégorie' in df_st_raw.columns:
+        cats = sorted(df_st_raw['Catégorie'].dropna().unique())
+    else:
+        cats = []
+
+    st.markdown('Éditez les paramètres par catégorie. Ces paramètres sont persistés dans `parametres_stock.json`.')
+
+    # build editable dataframe
+    rows = []
+    for c in cats:
+        p = params.get(c, {})
+        rows.append({
+            'Catégorie': c,
+            'lead_time_mois': int(p.get('lead_time_mois', 1)),
+            'stock_securite': float(p.get('stock_securite', 0.0)),
+            'seuil_rupture': float(p.get('seuil_rupture', 1.0)),
+            'stock_cible': float(p.get('stock_cible', 0.0))
+        })
+
+    if not rows:
+        st.info('Aucune catégorie détectée — générez d\'abord l\'analyse ou importez un stock.')
+    else:
+        try:
+            df_params = st.experimental_data_editor(pd.DataFrame(rows), num_rows='dynamic')
+        except Exception:
+            # fallback simple editor
+            st.warning('Éditeur interactif non disponible — utilisez les champs ci-dessous.')
+            edited = []
+            for r in rows:
+                with st.expander(r['Catégorie']):
+                    lt = st.number_input(f"Lead time (mois) — {r['Catégorie']}", min_value=0, value=r['lead_time_mois'], key=f"lt_{r['Catégorie']}")
+                    ss = st.number_input(f"Stock sécurité — {r['Catégorie']}", min_value=0.0, value=r['stock_securite'], key=f"ss_{r['Catégorie']}")
+                    sr = st.number_input(f"Seuil rupture — {r['Catégorie']}", min_value=0.0, value=r['seuil_rupture'], key=f"sr_{r['Catégorie']}")
+                    sc = st.number_input(f"Stock cible — {r['Catégorie']}", min_value=0.0, value=r['stock_cible'], key=f"sc_{r['Catégorie']}")
+                    edited.append({'Catégorie': r['Catégorie'], 'lead_time_mois': int(lt), 'stock_securite': float(ss), 'seuil_rupture': float(sr), 'stock_cible': float(sc)})
+            df_params = pd.DataFrame(edited)
+
+        c1, c2 = st.columns([1, 1])
+        if c1.button('Enregistrer'):
+            out = {}
+            for _, r in df_params.iterrows():
+                out[str(r['Catégorie'])] = {
+                    'lead_time_mois': int(r['lead_time_mois']),
+                    'stock_securite': float(r['stock_securite']),
+                    'seuil_rupture': float(r['seuil_rupture']),
+                    'stock_cible': float(r['stock_cible'])
+                }
+            try:
+                with open(params_file, 'w', encoding='utf-8') as f:
+                    json.dump(out, f, ensure_ascii=False, indent=2)
+                st.success('Paramètres enregistrés.')
+                st.session_state['parametres_stock'] = out
+            except Exception as e:
+                st.error(f"Erreur lors de l'enregistrement : {e}")
+
+        if c2.button('Réinitialiser'):
+            if os.path.exists(params_file):
+                try:
+                    os.remove(params_file)
+                except Exception:
+                    st.error('Impossible de supprimer le fichier de paramètres.')
+            st.session_state.pop('parametres_stock', None)
+            st.success('Paramètres réinitialisés.')
+    st.stop()
+
 if page == "📚 Historique":
     st.markdown("<h2 class='woodmat-page-title'>Historique des analyses</h2>", unsafe_allow_html=True)
     hist = pd.DataFrame(st.session_state.get("analysis_history", []),
@@ -924,7 +1009,6 @@ if page == "📚 Historique":
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
-if page == "📈 Analyses":
     st.markdown("<h2 class='woodmat-page-title'>Analyses</h2>", unsafe_allow_html=True)
 
     # Basic checks and helpful debug messages if data is missing
@@ -942,12 +1026,22 @@ if page == "📈 Analyses":
 
     st.markdown("<div class='woodmat-muted'>Module d'analyses métier — ABC, XYZ, Matrice, Pareto, TOP/FLOP, par catégorie, évolution et synthèse.</div>", unsafe_allow_html=True)
 
-    # Ensure we have unit price if available in the original stock raw file
+    # --- Data audit: show available columns to drive analyses ---
     df_st_raw = st.session_state.get('df_st_raw')
+    cols_sm = list(sm.columns)
+    cols_mv = list(df_mv.columns) if df_mv is not None else []
+    cols_st = list(df_st_raw.columns) if df_st_raw is not None else []
+    st.markdown("**Audit des colonnes disponibles (extrait)**")
+    st.write({'sm_columns_sample': cols_sm[:60], 'df_mv_columns_sample': cols_mv[:60], 'df_st_columns_sample': cols_st[:60]})
+
+    # helper
+    def has(cols, name):
+        return name in cols
+
+    # detect unit price availability but do NOT invent prices
     price_available = False
     price_series = None
     if df_st_raw is not None:
-        # detect candidate price column
         price_cols = [c for c in df_st_raw.columns if any(k in str(c).upper() for k in ['PU', 'PRIX', 'PRICE', 'PU_HT'])]
         if price_cols:
             pc = price_cols[0]
@@ -958,20 +1052,30 @@ if page == "📈 Analyses":
             except Exception:
                 price_available = False
 
-    # Prepare base dataframe for analyses
+    # Prepare ana dataframe using only existing columns
     ana = sm.copy()
-    ana['Valeur_12M'] = ana['S_12M'] * (ana.get('PU_HT', 0) if 'PU_HT' in ana.columns else 0)
+    # Standardize keys we will use
+    if 'S_12M' in ana.columns:
+        ana['Sorties_12M'] = ana['S_12M'].fillna(0).astype(float)
+    else:
+        ana['Sorties_12M'] = 0.0
+
+    if 'S_4M' in ana.columns:
+        ana['Sorties_4M'] = ana['S_4M'].fillna(0).astype(float)
+
+    # Value proxy: do NOT invent prices — if absent, use Sorties_12M as proxy and document limitation
     if price_available and price_series is not None:
         ana = ana.set_index('Référence')
         ana['PU_detected'] = price_series
-        ana['Valeur_12M'] = ana['S_12M'] * ana['PU_detected'].fillna(0)
+        ana['Valeur_12M'] = ana['Sorties_12M'] * ana['PU_detected'].fillna(0)
         ana = ana.reset_index()
-        missing_price = ana['PU_detected'].isna().sum()
+        st.info('Prix détecté dans le stock actuel — la Valeur 12M est calculée à partir des PU détectés.')
+        value_used = 'financial'
     else:
-        # fallback: use S_12M as proxy for value (documented limitation)
         ana['PU_detected'] = float('nan')
-        ana['Valeur_12M'] = ana['S_12M']
-        missing_price = len(ana)
+        ana['Valeur_12M'] = ana['Sorties_12M']
+        st.info('⚠️ Limitation : aucun prix unitaire fiable détecté. L\'ABC et le Pareto utilisent Sorties 12M (quantité) comme proxy de valeur.')
+        value_used = 'quantity_proxy'
 
     # tabs
     tab_abc, tab_xyz, tab_matrix, tab_pareto, tab_topflop, tab_cat, tab_evo, tab_synth = st.tabs([
@@ -981,24 +1085,35 @@ if page == "📈 Analyses":
     # ---------- ABC ----------
     with tab_abc:
         st.markdown("### Analyse ABC")
-        if not price_available:
-            st.info("Prix unitaire non détecté — utilisation des Sorties 12M comme proxy de valeur. (Donnée manquante)")
-        df_abc = ana[['Référence', 'Designation', 'Cat', 'S_12M', 'Valeur_12M']].copy()
-        df_abc = df_abc.sort_values('Valeur_12M', ascending=False)
-        total_value = df_abc['Valeur_12M'].sum()
+        # ensure required display columns exist
+        for c in ['Référence', 'Designation', 'Cat']:
+            if c not in ana.columns:
+                ana[c] = 'N/A'
+
+        df_abc = ana[['Référence', 'Designation', 'Cat', 'Sorties_12M', 'Valeur_12M']].copy()
+        df_abc = df_abc.sort_values('Valeur_12M', ascending=False).reset_index(drop=True)
+        total_value = float(df_abc['Valeur_12M'].sum())
         df_abc['Cumul'] = df_abc['Valeur_12M'].cumsum()
-        df_abc['Cumul_pct'] = df_abc['Cumul'] / total_value.replace({0:1})
+        if total_value > 0:
+            df_abc['Cumul_pct'] = df_abc['Cumul'] / total_value
+        else:
+            df_abc['Cumul_pct'] = 0.0
         def abc_class(v):
             if v <= 0.80:
                 return 'A'
             if v <= 0.95:
                 return 'B'
             return 'C'
-        df_abc['Classe_ABC'] = df_abc['Cumul_pct'].apply(abc_class)
+        if total_value == 0:
+            df_abc['Classe_ABC'] = 'C'
+            st.warning("Aucune sortie sur 12M détectée — l'ABC est indisponible par valeur; toutes les références sont marquées 'C'.")
+        else:
+            df_abc['Classe_ABC'] = df_abc['Cumul_pct'].apply(abc_class)
+
         counts = df_abc['Classe_ABC'].value_counts().reindex(['A','B','C']).fillna(0).astype(int)
-        pct_refs = (counts / len(df_abc) * 100).round(1)
+        pct_refs = (counts / len(df_abc) * 100).round(1) if len(df_abc) > 0 else counts
         val_pct = df_abc.groupby('Classe_ABC')['Valeur_12M'].sum().reindex(['A','B','C']).fillna(0)
-        val_pct = (val_pct / total_value.replace({0:1}) * 100).round(1)
+        val_pct = (val_pct / (total_value if total_value > 0 else 1) * 100).round(1)
         st.markdown(f"Références total : **{len(df_abc)}**")
         st.write(pd.DataFrame({
             'Nb références': counts,
@@ -1006,8 +1121,8 @@ if page == "📈 Analyses":
             '% valeur': val_pct
         }))
         add_export_buttons(df_abc, 'analyse_abc_table', 'ABC détaillé', date_max)
-        st.dataframe(df_abc.rename(columns={'Designation':'Désignation','Cat':'Catégorie','S_12M':'Sorties 12M','Valeur_12M':'Valeur 12M'}), use_container_width=True, height=420)
-        # Pareto chart
+        st.dataframe(df_abc.rename(columns={'Designation':'Désignation','Cat':'Catégorie','Sorties_12M':'Sorties 12M','Valeur_12M':'Valeur 12M'}), use_container_width=True, height=420)
+        # Pareto chart (uses Valeur_12M which may be proxy)
         fig = go.Figure()
         fig.add_trace(go.Bar(x=df_abc['Référence'], y=df_abc['Valeur_12M'], name='Valeur 12M'))
         fig.add_trace(go.Scatter(x=df_abc['Référence'], y=(df_abc['Cumul_pct']*100), name='Cumul %', yaxis='y2'))
@@ -1017,7 +1132,10 @@ if page == "📈 Analyses":
     # ---------- XYZ ----------
     with tab_xyz:
         st.markdown("### Analyse XYZ — régularité de la demande")
-        s_all = df_mv[df_mv['ES']=='S']
+        s_all = df_mv[df_mv['ES']=='S'] if 'ES' in df_mv.columns else pd.DataFrame()
+        if s_all.empty:
+            st.warning('Aucune sortie enregistrée dans les mouvements — XYZ indisponible.')
+            st.stop()
         # monthly series for last 12 months
         s_12m = s_all[(s_all['Date'] >= date_12m_debut) & (s_all['Date'] <= date_max)].copy()
         s_12m['Mois'] = s_12m['Date'].dt.to_period('M').dt.to_timestamp()
@@ -1031,8 +1149,8 @@ if page == "📈 Analyses":
         stats = []
         for ref, row in piv.iterrows():
             vals = row.values.astype(float)
-            mean = vals.mean()
-            std = vals.std(ddof=0)
+            mean = float(vals.mean())
+            std = float(vals.std(ddof=0))
             if mean == 0:
                 cv = float('inf')
             else:
@@ -1052,18 +1170,20 @@ if page == "📈 Analyses":
         df_xyz['Classe_XYZ'] = df_xyz.apply(xyz_label, axis=1)
         counts_xyz = df_xyz['Classe_XYZ'].value_counts().reindex(['X','Y','Z','Z / Sans demande']).fillna(0).astype(int)
         st.write(pd.DataFrame({'Nb références': counts_xyz}))
-        # merge for detailed table
-        df_xyz = df_xyz.merge(ana[['Référence','Designation','Cat','S_12M','S_4M']], on='Référence', how='left')
+        merge_cols = [c for c in ['Référence','Designation','Cat','S_12M','S_4M'] if c in ana.columns]
+        df_xyz = df_xyz.merge(ana[merge_cols], on='Référence', how='left')
         add_export_buttons(df_xyz, 'analyse_xyz_table', 'XYZ détaillé', date_max)
         st.dataframe(df_xyz.sort_values(['Classe_XYZ','CV']), use_container_width=True, height=420)
 
     # ---------- ABC x XYZ matrix ----------
     with tab_matrix:
         st.markdown("### Matrice ABC × XYZ")
+        if df_abc.empty or df_xyz.empty:
+            st.warning('Données ABC ou XYZ insuffisantes pour générer la matrice.')
+            st.stop()
         merged = df_abc[['Référence','Classe_ABC']].merge(df_xyz[['Référence','Classe_XYZ']], on='Référence', how='inner')
         matrix = pd.crosstab(merged['Classe_ABC'], merged['Classe_XYZ'])
         st.dataframe(matrix, use_container_width=True)
-        # interpretations
         interpretations = {
             'AX': 'Priorité maximale, demande importante et régulière',
             'AY': 'Importante mais variable',
@@ -1078,15 +1198,17 @@ if page == "📈 Analyses":
     # ---------- Pareto ----------
     with tab_pareto:
         st.markdown("### Pareto — valeur cumulée")
-        cats = sorted(ana['Cat'].dropna().unique())
+        cats = sorted(ana['Cat'].dropna().unique()) if 'Cat' in ana.columns else []
         choice = st.selectbox("Filtrer par catégorie", options=['Toutes'] + cats)
         dfp = ana.copy()
         if choice != 'Toutes':
             dfp = dfp[dfp['Cat'] == choice]
-        dfp = dfp.sort_values('Valeur_12M', ascending=False)
+        dfp = dfp.sort_values('Valeur_12M', ascending=False).reset_index(drop=True)
         dfp['Cumul'] = dfp['Valeur_12M'].cumsum()
-        total = dfp['Valeur_12M'].sum()
-        dfp['Cumul_pct'] = dfp['Cumul'] / total.replace({0:1})
+        total = float(dfp['Valeur_12M'].sum())
+        dfp['Cumul_pct'] = dfp['Cumul'] / (total if total > 0 else 1)
+        if total == 0:
+            st.warning('Aucune valeur disponible pour le Pareto (Sorties 12M = 0).')
         fig = go.Figure()
         fig.add_trace(go.Bar(x=dfp['Référence'], y=dfp['Valeur_12M'], name='Valeur'))
         fig.add_trace(go.Scatter(x=dfp['Référence'], y=dfp['Cumul_pct']*100, name='Cumul %', yaxis='y2'))
@@ -1094,15 +1216,17 @@ if page == "📈 Analyses":
         fig.add_hline(y=95, line_dash='dash', line_color='orange')
         fig.update_layout(yaxis2=dict(overlaying='y', side='right', range=[0,100]), height=420, margin=dict(b=120))
         st.plotly_chart(fig, use_container_width=True)
-        add_export_buttons(dfp[['Référence','S_12M','Valeur_12M','Cumul_pct']], 'pareto', 'Pareto', date_max)
+        export_cols = [c for c in ['Référence','S_12M','Valeur_12M','Cumul_pct'] if c in dfp.columns]
+        add_export_buttons(dfp[export_cols], 'pareto', 'Pareto', date_max)
 
     # ---------- TOP / FLOP ----------
     with tab_topflop:
         st.markdown("### TOP / FLOP — synthèse")
-        # TOP lists
-        top_s12 = ana.sort_values('S_12M', ascending=False).head(10)[['Référence','Designation','Cat','S_12M','S_4M','Rotation_Actuelle','Rotation_12M']]
-        top_s4 = ana.sort_values('S_4M', ascending=False).head(10)[['Référence','Designation','Cat','S_12M','S_4M','Rotation_Actuelle','Rotation_12M']]
-        top_rot = ana.sort_values('Rotation_Actuelle', ascending=False).head(10)[['Référence','Designation','Cat','Rotation_Actuelle','S_12M','Stock']]
+        # TOP lists - use only existing columns
+        top_s12_cols = [c for c in ['Référence','Designation','Cat','S_12M','S_4M','Rotation_Actuelle','Rotation_12M'] if c in ana.columns]
+        top_s12 = ana.sort_values('Sorties_12M', ascending=False).head(10)[[c for c in top_s12_cols if c in ana.columns]]
+        top_s4 = ana.sort_values('Sorties_4M', ascending=False).head(10)[[c for c in top_s12_cols if c in ana.columns and 'S_4M' in ana.columns]] if 'S_4M' in ana.columns else pd.DataFrame()
+        top_rot = ana.sort_values('Rotation_Actuelle', ascending=False).head(10)[[c for c in ['Référence','Designation','Cat','Rotation_Actuelle','Sorties_12M','Stock'] if c in ana.columns]] if 'Rotation_Actuelle' in ana.columns else pd.DataFrame()
         st.markdown('#### 🔥 TOP références (Sorties 12M)')
         st.dataframe(top_s12, use_container_width=True)
         st.markdown('#### 🔥 TOP références (Sorties 4M)')
@@ -1111,67 +1235,87 @@ if page == "📈 Analyses":
         st.dataframe(top_rot, use_container_width=True)
 
         # FLOP heuristic: faible sortie 12M (bottom 20%), stock élevé (top 30%), couverture élevée
-        thr_low = ana['S_12M'].quantile(0.20)
-        thr_stock_high = ana['Stock'].quantile(0.70)
-        flop = ana[(ana['S_12M'] <= thr_low) & (ana['Stock'] >= thr_stock_high)].copy()
-        flop = flop[['Référence','Designation','Cat','S_12M','Stock','Couverture','Taux_Immob','Dern_Sortie']].sort_values(['S_12M','Stock'], ascending=[True,False]).head(50)
-        st.markdown('#### ⚠️ FLOP (heuristique)')
-        st.dataframe(flop, use_container_width=True)
+        thr_low = ana['Sorties_12M'].quantile(0.20) if 'Sorties_12M' in ana.columns else 0
+        thr_stock_high = ana['Stock'].quantile(0.70) if 'Stock' in ana.columns else 0
+        flop = ana[(ana['Sorties_12M'] <= thr_low) & (ana.get('Stock', 0) >= thr_stock_high)].copy()
+        flop_cols = [c for c in ['Référence','Designation','Cat','Sorties_12M','Stock','Couverture','Taux_Immob','Dern_Sortie'] if c in flop.columns]
+        if flop.empty:
+            st.info('Aucune référence répondant aux critères FLOP n\'a été trouvée.')
+        else:
+            flop = flop[flop_cols].sort_values(['Sorties_12M','Stock'] if 'Sorties_12M' in flop.columns else ['Stock'], ascending=[True,False]).head(50)
+            st.markdown('#### ⚠️ FLOP (heuristique)')
+            st.dataframe(flop, use_container_width=True)
 
     # ---------- Par catégorie ----------
     with tab_cat:
         st.markdown('### Analyse par catégorie')
-        grp = ana.groupby('Cat').agg(
-            Nb_ref=('Référence','nunique'),
-            Stock_total=('Stock','sum'),
-            Sorties_12M=('S_12M','sum'),
-            Moy_Mois_12M=('Moy_Mois_12M','mean'),
-            Sorties_4M=('S_4M','sum'),
-            Moy_Mois_4M=('Moy_Mois_4M','mean'),
-            Rotation_actuelle_glob=('Rotation_Actuelle','mean'),
-            Couverture_moy=('Couverture','mean'),
-            Immob_moy=('Taux_Immob','mean'),
-            Dormant=('Class', lambda s: (s=='Dormant').sum()),
-            A_risque_rupture=('Couverture', lambda s: (s <= 1).sum())
-        ).reset_index()
-        st.dataframe(grp, use_container_width=True)
-        add_export_buttons(grp, 'analyse_par_categorie', 'Par catégorie', date_max)
+        # build aggregation using available columns; missing columns will produce NaN but table will show availability
+        agg_map = {
+            'Nb_ref': ('Référence','nunique'),
+            'Stock_total': ('Stock','sum'),
+            'Sorties_12M': ('Sorties_12M','sum'),
+            'Moy_Mois_12M': ('Moy_Mois_12M','mean'),
+            'Sorties_4M': ('Sorties_4M','sum'),
+            'Moy_Mois_4M': ('Moy_Mois_4M','mean'),
+            'Rotation_actuelle_glob': ('Rotation_Actuelle','mean'),
+            'Couverture_moy': ('Couverture','mean'),
+            'Immobilisation_moy': ('Taux_Immob','mean'),
+            'Dormant': ('Class', lambda s: (s=='Dormant').sum()),
+            'A_risque_rupture': ('Couverture', lambda s: (s <= 1).sum())
+        }
+        valid_aggs = {k:v for k,v in agg_map.items() if v[0] in ana.columns}
+        if not valid_aggs:
+            st.warning('Colonnes nécessaires à l\'analyse par catégorie manquantes.')
+        else:
+            grp = ana.groupby('Cat').agg(**{k: v for k,v in valid_aggs.items()}).reset_index()
+            st.dataframe(grp, use_container_width=True)
+            add_export_buttons(grp, 'analyse_par_categorie', 'Par catégorie', date_max)
 
     # ---------- Évolution mensuelle ----------
     with tab_evo:
         st.markdown('### Évolution mensuelle (12 derniers mois)')
-        refs_filter = st.selectbox('Filtrer par référence (optionnel)', options=['Toutes'] + sorted(ana['Référence'].astype(str).unique()))
-        cats_filter = st.selectbox('Filtrer par catégorie', options=['Toutes'] + sorted(ana['Cat'].dropna().unique()))
+        refs_filter = st.selectbox('Filtrer par référence (optionnel)', options=['Toutes'] + sorted(ana['Référence'].astype(str).unique()) if 'Référence' in ana.columns else ['Toutes'])
+        cats_filter = st.selectbox('Filtrer par catégorie', options=['Toutes'] + sorted(ana['Cat'].dropna().unique()) if 'Cat' in ana.columns else ['Toutes'])
         evo_df = evolution_mensuelle(df_mv, None)
         if refs_filter != 'Toutes':
             evo_df = evolution_mensuelle(df_mv, [refs_filter])
         if cats_filter != 'Toutes':
-            refs_in_cat = ana[ana['Cat']==cats_filter]['Référence'].tolist()
+            refs_in_cat = ana[ana['Cat']==cats_filter]['Référence'].tolist() if 'Cat' in ana.columns else []
             evo_df = evolution_mensuelle(df_mv, refs_in_cat)
-        evo_df = evo_df.sort_values('Mois')
-        evo_df['MA3'] = evo_df['Qty'].rolling(3, min_periods=1).mean()
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=evo_df['Mois'], y=evo_df['Qty'], name='Sorties mensuelles'))
-        fig.add_trace(go.Line(x=evo_df['Mois'], y=evo_df['MA3'], name='Moyenne mobile 3M'))
-        st.plotly_chart(fig, use_container_width=True)
-        add_export_buttons(evo_df, 'evolution_mensuelle', 'Évolution mensuelle', date_max)
+        if evo_df.empty:
+            st.warning('Pas de sorties mensuelles disponibles pour la période sélectionnée.')
+        else:
+            evo_df = evo_df.sort_values('Mois')
+            evo_df['MA3'] = evo_df['Qty'].rolling(3, min_periods=1).mean()
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=evo_df['Mois'], y=evo_df['Qty'], name='Sorties mensuelles'))
+            fig.add_trace(go.Line(x=evo_df['Mois'], y=evo_df['MA3'], name='Moyenne mobile 3M'))
+            st.plotly_chart(fig, use_container_width=True)
+            add_export_buttons(evo_df, 'evolution_mensuelle', 'Évolution mensuelle', date_max)
 
     # ---------- Dashboard synthétique ----------
     with tab_synth:
         st.markdown('### Dashboard synthétique')
-        total_refs = ana['Référence'].nunique()
-        n_abc_a = df_abc[df_abc['Classe_ABC']=='A']['Référence'].nunique()
-        n_xyz_z = df_xyz[df_xyz['Classe_XYZ'].str.startswith('Z')]['Référence'].nunique()
-        n_ax = merged[(merged['Classe_ABC']=='A') & (merged['Classe_XYZ'].str.startswith('X'))]['Référence'].nunique()
-        n_rupture = int((ana['Class']=='Rupture').sum())
-        n_sous_seuil = int((ana['Couverture'] <= 1).sum())
-        n_dormant = int((ana['Class']=='Dormant').sum())
-        immobilise = (ana['Stock'] * ana.get('CUMP', 0)).sum() if 'CUMP' in ana.columns else ana['Stock'].sum()
-        st.write({'Total références': total_refs, 'ABC-A': n_abc_a, 'XYZ-Z': n_xyz_z, 'AX': n_ax, 'Rupture': n_rupture, 'Sous seuil': n_sous_seuil, 'Dormant': n_dormant, 'Stock immobilisé (proxy)': immobilise})
+        total_refs = ana['Référence'].nunique() if 'Référence' in ana.columns else 0
+        n_abc_a = df_abc[df_abc['Classe_ABC']=='A']['Référence'].nunique() if not df_abc.empty else 0
+        n_xyz_z = df_xyz[df_xyz['Classe_XYZ'].astype(str).str.startswith('Z')]['Référence'].nunique() if not df_xyz.empty else 0
+        n_ax = merged[(merged['Classe_ABC']=='A') & (merged['Classe_XYZ'].astype(str).str.startswith('X'))]['Référence'].nunique() if 'merged' in locals() and not merged.empty else 0
+        n_rupture = int((ana['Class']=='Rupture').sum()) if 'Class' in ana.columns else 0
+        n_sous_seuil = int((ana['Couverture'] <= 1).sum()) if 'Couverture' in ana.columns else 0
+        n_dormant = int((ana['Class']=='Dormant').sum()) if 'Class' in ana.columns else 0
+        # Stock immobilisé: do NOT use price — present a physical metric
+        immobilise_phys = ana['Stock'].sum() if 'Stock' in ana.columns else 0
+        st.write({'Total références': total_refs, 'ABC-A': n_abc_a, 'XYZ-Z': n_xyz_z, 'AX': n_ax, 'Rupture': n_rupture, 'Sous seuil': n_sous_seuil, 'Dormant': n_dormant, 'Stock immobilisé (physique_unité)': immobilise_phys})
         st.markdown('#### TOP 10 (Sorties 12M)')
-        st.dataframe(ana.sort_values('S_12M', ascending=False).head(10)[['Référence','Designation','Cat','S_12M','Stock']], use_container_width=True)
+        if 'Sorties_12M' in ana.columns:
+            st.dataframe(ana.sort_values('Sorties_12M', ascending=False).head(10)[[c for c in ['Référence','Designation','Cat','Sorties_12M','Stock'] if c in ana.columns]], use_container_width=True)
+        else:
+            st.info('Sorties 12M non disponibles — TOP non calculable.')
         st.markdown('#### FLOP 10 (heuristique)')
-        st.dataframe(flop.head(10), use_container_width=True)
+        if 'flop' in locals() and not flop.empty:
+            st.dataframe(flop.head(10), use_container_width=True)
+        else:
+            st.info('Pas de FLOP calculable avec les données disponibles.')
 
     st.success('Analyses générées à partir des données chargées.')
 
@@ -1316,8 +1460,40 @@ if page == "📄 Rapports":
     report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois_12M',
                    'S_4M', 'Moy_Mois_4M', 'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label']
     report_df = f[report_cols].rename(columns=rename_cols)
+
+    # Résumé de la vue courante
+    total_refs = len(report_df)
+    total_stock = report_df['Stock'].sum() if 'Stock' in report_df.columns else 0.0
+    total_sorties_12m = report_df['Sorties 12M'].sum() if 'Sorties 12M' in report_df.columns else 0.0
+    rotation_globale = total_sorties_12m / total_stock if total_stock > 0 else float('nan')
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('Références', f'{total_refs:,}'.replace(',', ' '))
+    c2.metric('Stock total', format_nombre_fr(total_stock, 3))
+    c3.metric('Sorties 12M', format_nombre_fr(total_sorties_12m, 2))
+    c4.metric('Rotation globale', format_nombre_fr(rotation_globale, 2))
+
+    st.markdown('#### Filtres actifs')
+    active_filters = {
+        'Catégorie': sel_cats if sel_cats else 'Toutes',
+        'Classification': sel_class if sel_class else 'Toutes',
+        'Unité': sel_unites if sel_unites else 'Toutes',
+        'Références': f'{len(sel_refs)} sélectionnée(s)' if sel_refs else 'Toutes',
+        'Recherche': recherche or 'Aucune'
+    }
+    st.write(active_filters)
+
+    st.divider()
     add_export_buttons(report_df, 'rapport_rotation', 'Rapport Rotation', date_max)
-    st.dataframe(report_df, use_container_width=True, height=460)
+    st.dataframe(report_df, use_container_width=True, height=420)
+
+    # Historique des analyses
+    hist = st.session_state.get('analysis_history', [])
+    if hist:
+        with st.expander('Historique des analyses récentes', expanded=False):
+            hist_df = pd.DataFrame(hist)
+            st.dataframe(hist_df.sort_values('Date', ascending=False).reset_index(drop=True), use_container_width=True, height=320)
+    else:
+        st.info('Aucune analyse historique disponible pour l\'instant.')
     st.stop()
 
 # ── KPIs ─────────────────────────────────────────────────
