@@ -20,7 +20,18 @@ st.set_page_config(page_title="WOODMAT — Rotation du stock", layout="wide",
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_HISTORIQUE = os.path.join(APP_DIR, "base_mouvements.pkl")  # base 2020-2025, livrée avec l'app
 USERS_FILE = os.path.join(APP_DIR, "woodmat_users.json")
+PARAMS_FILE = os.path.join(APP_DIR, "parametres_stock.json")
 SEUIL = 0.001
+
+# ── Paramètres de réapprovisionnement — valeurs de repli utilisées UNIQUEMENT si
+#    aucun paramètre n'a encore été saisi pour une catégorie dans la page Paramètres.
+#    Jamais déduites des données : ce sont des constantes documentées. ──
+DEFAULT_PARAMS_CATEGORIE = {
+    'lead_time_mois': 1.0,      # Délai d'approvisionnement (mois)
+    'seuil_rupture': 1.0,       # Seuil de rupture (mois)
+    'stock_securite': 0.0,      # Stock de sécurité (mois)
+    'stock_cible': 3.0,         # Stock cible (mois)
+}
 
 CLASS_COLORS = {
     'Rupture': '#FFC7CE', 'Critique': '#FF8A8A', 'Stock faible': '#FFD9A0',
@@ -595,6 +606,89 @@ def replenishment_action(couverture):
     return "🟢 Rien à faire"
 
 
+def charger_parametres_stock():
+    """Charge parametres_stock.json (paramètres par catégorie). {} si absent/invalide."""
+    if os.path.exists(PARAMS_FILE):
+        try:
+            with open(PARAMS_FILE, 'r', encoding='utf-8') as fp:
+                return json.load(fp)
+        except Exception:
+            return {}
+    return {}
+
+
+def get_params_categorie(cat, params):
+    """Paramètres effectifs d'une catégorie : valeurs saisies dans Paramètres,
+    sinon repli sur DEFAULT_PARAMS_CATEGORIE (jamais déduites des données)."""
+    p = (params or {}).get(cat, {})
+    return {
+        'delai_appro_mois': float(p.get('lead_time_mois', DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])),
+        'seuil_rupture_mois': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
+        'stock_securite_mois': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
+        'stock_cible_mois': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible'])),
+    }
+
+
+def calculer_moteur_reappro(df, params=None):
+    """
+    Moteur de réapprovisionnement — applique les 4 paramètres définis PAR CATÉGORIE
+    (Délai d'approvisionnement, Seuil de rupture, Stock de sécurité, Stock cible) à
+    chaque référence de `df`. Les 4 restent toujours distincts (jamais fondus l'un
+    dans l'autre).
+
+    Consommation mensuelle moyenne = Moy_Mois_4M, déjà calculée dans
+    calculer_indicateurs() à partir des sorties réelles des 4 derniers mois — jamais
+    inventée. Si elle est nulle (aucune sortie récente), la recommandation est
+    marquée explicitement non fiable plutôt que masquée ou forcée à une valeur.
+
+    Ne modifie aucune donnée source de mouvements : ajoute uniquement des colonnes
+    calculées à une COPIE du DataFrame fourni.
+    """
+    if params is None:
+        params = charger_parametres_stock()
+    d = df.copy()
+
+    par_cat = {cat: get_params_categorie(cat, params) for cat in d['Cat'].dropna().unique()}
+    d['Delai_Appro_Mois'] = d['Cat'].map(lambda c: par_cat.get(c, get_params_categorie(c, params))['delai_appro_mois'])
+    d['Seuil_Rupture_Mois'] = d['Cat'].map(lambda c: par_cat.get(c, get_params_categorie(c, params))['seuil_rupture_mois'])
+    d['Stock_Securite_Mois'] = d['Cat'].map(lambda c: par_cat.get(c, get_params_categorie(c, params))['stock_securite_mois'])
+    d['Stock_Cible_Mois'] = d['Cat'].map(lambda c: par_cat.get(c, get_params_categorie(c, params))['stock_cible_mois'])
+
+    conso = d['Moy_Mois_4M'] if 'Moy_Mois_4M' in d.columns else pd.Series(0.0, index=d.index)
+    d['Conso_Mensuelle_Moyenne'] = conso.fillna(0.0)
+    d['Demande_Recente'] = d['Conso_Mensuelle_Moyenne'] > 0
+
+    # Couverture (mois) = Stock actuel ÷ Consommation mensuelle moyenne réelle (4M)
+    d['Couverture_Reappro'] = float('nan')
+    m = d['Demande_Recente']
+    d.loc[m, 'Couverture_Reappro'] = (d.loc[m, 'Stock'] / d.loc[m, 'Conso_Mensuelle_Moyenne']).round(2)
+
+    def _risque(row):
+        if not row['Demande_Recente']:
+            return '⚪ Sans demande récente — recommandation non fiable'
+        cov = row['Couverture_Reappro']
+        if cov <= row['Seuil_Rupture_Mois']:
+            return '🔴 Risque de rupture'
+        if cov <= row['Delai_Appro_Mois']:
+            return '⚠️ Commander maintenant (avant réception)'
+        return '🟢 Couverture suffisante'
+    d['Risque_Reappro'] = d.apply(_risque, axis=1)
+
+    # Quantité recommandée = max(0, Stock cible × Conso mensuelle moyenne − Stock actuel)
+    d['Qte_Recommandee'] = 0.0
+    d.loc[m, 'Qte_Recommandee'] = (
+        d.loc[m, 'Stock_Cible_Mois'] * d.loc[m, 'Conso_Mensuelle_Moyenne'] - d.loc[m, 'Stock']
+    ).clip(lower=0).round(2)
+
+    # Stock de sécurité : signal distinct (protection contre la variabilité), jamais
+    # fondu dans la quantité recommandée ci-dessus.
+    d['Sous_Stock_Securite'] = False
+    d.loc[m, 'Sous_Stock_Securite'] = d.loc[m, 'Stock'] < (d.loc[m, 'Stock_Securite_Mois'] * d.loc[m, 'Conso_Mensuelle_Moyenne'])
+
+    d['Fiabilite'] = d['Demande_Recente'].map({True: 'Fiable (4M réels)', False: 'Non fiable — sans demande récente'})
+    return d
+
+
 # ============================================================
 # FEUILLE STOCK BOIS ROUGE (Qualité × Fournisseur × Dimension)
 # ENSO et STORA ENSO sont le même fournisseur → fusionnés en une seule colonne
@@ -918,7 +1012,7 @@ if page == "👥 Gestion des utilisateurs":
 
 if page == "⚙️ Paramètres":
     st.markdown("<h2 class='woodmat-page-title'>⚙️ Paramètres</h2>", unsafe_allow_html=True)
-    params_file = os.path.join(APP_DIR, "parametres_stock.json")
+    params_file = PARAMS_FILE
 
     def load_params():
         if os.path.exists(params_file):
@@ -948,10 +1042,10 @@ if page == "⚙️ Paramètres":
         p = params.get(c, {})
         rows.append({
             'Catégorie': c,
-            'lead_time_mois': int(p.get('lead_time_mois', 1)),
-            'stock_securite': float(p.get('stock_securite', 0.0)),
-            'seuil_rupture': float(p.get('seuil_rupture', 1.0)),
-            'stock_cible': float(p.get('stock_cible', 0.0))
+            'lead_time_mois': int(p.get('lead_time_mois', DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])),
+            'stock_securite': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
+            'seuil_rupture': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
+            'stock_cible': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible']))
         })
 
     if not rows:
@@ -1009,6 +1103,7 @@ if page == "📚 Historique":
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
+if page == "📈 Analyses":
     st.markdown("<h2 class='woodmat-page-title'>Analyses</h2>", unsafe_allow_html=True)
 
     # Basic checks and helpful debug messages if data is missing
@@ -1031,26 +1126,33 @@ if page == "📚 Historique":
     cols_sm = list(sm.columns)
     cols_mv = list(df_mv.columns) if df_mv is not None else []
     cols_st = list(df_st_raw.columns) if df_st_raw is not None else []
-    st.markdown("**Audit des colonnes disponibles (extrait)**")
-    st.write({'sm_columns_sample': cols_sm[:60], 'df_mv_columns_sample': cols_mv[:60], 'df_st_columns_sample': cols_st[:60]})
+    with st.expander("🔎 Audit des colonnes disponibles", expanded=False):
+        st.write({'sm_columns': cols_sm, 'df_mv_columns': cols_mv, 'df_st_columns': cols_st})
 
     # helper
     def has(cols, name):
         return name in cols
 
-    # detect unit price availability but do NOT invent prices
+    # Détection d'un prix unitaire réellement exploitable — jamais inventé.
+    # Une colonne au nom évocateur (PU/PRIX/PRICE) ne suffit pas : elle doit aussi
+    # contenir des valeurs numériques non nulles sur une part significative des
+    # lignes, sinon on reste sur le proxy quantité (Sorties 12M).
     price_available = False
     price_series = None
+    price_col_used = None
     if df_st_raw is not None:
-        price_cols = [c for c in df_st_raw.columns if any(k in str(c).upper() for k in ['PU', 'PRIX', 'PRICE', 'PU_HT'])]
-        if price_cols:
-            pc = price_cols[0]
+        price_cols = [c for c in df_st_raw.columns if any(k in str(c).upper() for k in ['PU', 'PRIX', 'PRICE'])]
+        for pc in price_cols:
             try:
-                df_st_raw['_PU'] = pd.to_numeric(df_st_raw[pc], errors='coerce')
-                price_series = df_st_raw.groupby('Référence')['_PU'].median()
-                price_available = True
+                vals = pd.to_numeric(df_st_raw[pc], errors='coerce')
+                if vals.notna().mean() > 0.5 and (vals.fillna(0) > 0).mean() > 0.1:
+                    df_st_raw['_PU'] = vals
+                    price_series = df_st_raw.groupby('Référence')['_PU'].median()
+                    price_available = True
+                    price_col_used = pc
+                    break
             except Exception:
-                price_available = False
+                continue
 
     # Prepare ana dataframe using only existing columns
     ana = sm.copy()
@@ -1069,7 +1171,7 @@ if page == "📚 Historique":
         ana['PU_detected'] = price_series
         ana['Valeur_12M'] = ana['Sorties_12M'] * ana['PU_detected'].fillna(0)
         ana = ana.reset_index()
-        st.info('Prix détecté dans le stock actuel — la Valeur 12M est calculée à partir des PU détectés.')
+        st.info(f"Prix détecté dans le stock actuel (colonne « {price_col_used} ») — la Valeur 12M est calculée à partir des PU détectés.")
         value_used = 'financial'
     else:
         ana['PU_detected'] = float('nan')
@@ -1133,67 +1235,69 @@ if page == "📚 Historique":
     with tab_xyz:
         st.markdown("### Analyse XYZ — régularité de la demande")
         s_all = df_mv[df_mv['ES']=='S'] if 'ES' in df_mv.columns else pd.DataFrame()
+        df_xyz = pd.DataFrame(columns=['Référence', 'Moy_Mois', 'Std_Mois', 'CV', 'Classe_XYZ'])
         if s_all.empty:
             st.warning('Aucune sortie enregistrée dans les mouvements — XYZ indisponible.')
-            st.stop()
-        # monthly series for last 12 months
-        s_12m = s_all[(s_all['Date'] >= date_12m_debut) & (s_all['Date'] <= date_max)].copy()
-        s_12m['Mois'] = s_12m['Date'].dt.to_period('M').dt.to_timestamp()
-        piv = s_12m.pivot_table(index='Référence', columns='Mois', values='Qty', aggfunc='sum', fill_value=0)
-        # ensure 12 months columns present
-        months = pd.date_range(date_12m_debut.normalize(), periods=12, freq='MS')
-        for m in months:
-            if m not in piv.columns:
-                piv[m] = 0
-        piv = piv[sorted(piv.columns)]
-        stats = []
-        for ref, row in piv.iterrows():
-            vals = row.values.astype(float)
-            mean = float(vals.mean())
-            std = float(vals.std(ddof=0))
-            if mean == 0:
-                cv = float('inf')
-            else:
-                cv = std / mean
-            stats.append((ref, mean, std, cv))
-        df_xyz = pd.DataFrame(stats, columns=['Référence', 'Moy_Mois', 'Std_Mois', 'CV'])
-        # classify
-        def xyz_label(r):
-            if r['Moy_Mois'] == 0:
-                return 'Z / Sans demande'
-            cv = r['CV']
-            if cv <= 0.5:
-                return 'X'
-            if cv <= 1.0:
-                return 'Y'
-            return 'Z'
-        df_xyz['Classe_XYZ'] = df_xyz.apply(xyz_label, axis=1)
-        counts_xyz = df_xyz['Classe_XYZ'].value_counts().reindex(['X','Y','Z','Z / Sans demande']).fillna(0).astype(int)
-        st.write(pd.DataFrame({'Nb références': counts_xyz}))
-        merge_cols = [c for c in ['Référence','Designation','Cat','S_12M','S_4M'] if c in ana.columns]
-        df_xyz = df_xyz.merge(ana[merge_cols], on='Référence', how='left')
-        add_export_buttons(df_xyz, 'analyse_xyz_table', 'XYZ détaillé', date_max)
-        st.dataframe(df_xyz.sort_values(['Classe_XYZ','CV']), use_container_width=True, height=420)
+        else:
+            # monthly series for last 12 months
+            s_12m = s_all[(s_all['Date'] >= date_12m_debut) & (s_all['Date'] <= date_max)].copy()
+            s_12m['Mois'] = s_12m['Date'].dt.to_period('M').dt.to_timestamp()
+            piv = s_12m.pivot_table(index='Reference', columns='Mois', values='Qty', aggfunc='sum', fill_value=0)
+            # ensure 12 months columns present
+            months = pd.date_range(date_12m_debut.normalize(), periods=12, freq='MS')
+            for m in months:
+                if m not in piv.columns:
+                    piv[m] = 0
+            piv = piv[sorted(piv.columns)]
+            stats = []
+            for ref, row in piv.iterrows():
+                vals = row.values.astype(float)
+                mean = float(vals.mean())
+                std = float(vals.std(ddof=0))
+                if mean == 0:
+                    cv = float('inf')
+                else:
+                    cv = std / mean
+                stats.append((ref, mean, std, cv))
+            df_xyz = pd.DataFrame(stats, columns=['Référence', 'Moy_Mois', 'Std_Mois', 'CV'])
+            # classify
+            def xyz_label(r):
+                if r['Moy_Mois'] == 0:
+                    return 'Z / Sans demande'
+                cv = r['CV']
+                if cv <= 0.5:
+                    return 'X'
+                if cv <= 1.0:
+                    return 'Y'
+                return 'Z'
+            df_xyz['Classe_XYZ'] = df_xyz.apply(xyz_label, axis=1)
+            counts_xyz = df_xyz['Classe_XYZ'].value_counts().reindex(['X','Y','Z','Z / Sans demande']).fillna(0).astype(int)
+            st.write(pd.DataFrame({'Nb références': counts_xyz}))
+            merge_cols = [c for c in ['Référence','Designation','Cat','S_12M','S_4M'] if c in ana.columns]
+            df_xyz = df_xyz.merge(ana[merge_cols], on='Référence', how='left')
+            add_export_buttons(df_xyz, 'analyse_xyz_table', 'XYZ détaillé', date_max)
+            st.dataframe(df_xyz.sort_values(['Classe_XYZ','CV']), use_container_width=True, height=420)
 
     # ---------- ABC x XYZ matrix ----------
     with tab_matrix:
         st.markdown("### Matrice ABC × XYZ")
         if df_abc.empty or df_xyz.empty:
-            st.warning('Données ABC ou XYZ insuffisantes pour générer la matrice.')
-            st.stop()
-        merged = df_abc[['Référence','Classe_ABC']].merge(df_xyz[['Référence','Classe_XYZ']], on='Référence', how='inner')
-        matrix = pd.crosstab(merged['Classe_ABC'], merged['Classe_XYZ'])
-        st.dataframe(matrix, use_container_width=True)
-        interpretations = {
-            'AX': 'Priorité maximale, demande importante et régulière',
-            'AY': 'Importante mais variable',
-            'AZ': 'Importante mais très irrégulière, gestion prudente',
-            'BX': 'Gestion standard', 'BY': 'Gestion standard', 'BZ': 'Surveillance',
-            'CX': 'Faible priorité', 'CY': 'Faible priorité', 'CZ': 'Faible valeur et demande irrégulière / potentiellement dormant'
-        }
-        st.markdown("**Interprétation automatique (exemples)**")
-        for k,v in interpretations.items():
-            st.markdown(f"- **{k}** → {v}")
+            st.warning('Données ABC ou XYZ insuffisantes pour générer la matrice — importez des mouvements de sortie.')
+            merged = pd.DataFrame(columns=['Référence', 'Classe_ABC', 'Classe_XYZ'])
+        else:
+            merged = df_abc[['Référence','Classe_ABC']].merge(df_xyz[['Référence','Classe_XYZ']], on='Référence', how='inner')
+            matrix = pd.crosstab(merged['Classe_ABC'], merged['Classe_XYZ'])
+            st.dataframe(matrix, use_container_width=True)
+            interpretations = {
+                'AX': 'Priorité maximale, demande importante et régulière',
+                'AY': 'Importante mais variable',
+                'AZ': 'Importante mais très irrégulière, gestion prudente',
+                'BX': 'Gestion standard', 'BY': 'Gestion standard', 'BZ': 'Surveillance',
+                'CX': 'Faible priorité', 'CY': 'Faible priorité', 'CZ': 'Faible valeur et demande irrégulière / potentiellement dormant'
+            }
+            st.markdown("**Interprétation automatique (exemples)**")
+            for k,v in interpretations.items():
+                st.markdown(f"- **{k}** → {v}")
 
     # ---------- Pareto ----------
     with tab_pareto:
@@ -1249,6 +1353,8 @@ if page == "📚 Historique":
     # ---------- Par catégorie ----------
     with tab_cat:
         st.markdown('### Analyse par catégorie')
+        st.caption("La rotation globale par catégorie est un ratio d'agrégats (ΣSorties ÷ ΣStock), "
+                   "jamais une moyenne des rotations individuelles des références.")
         # build aggregation using available columns; missing columns will produce NaN but table will show availability
         agg_map = {
             'Nb_ref': ('Référence','nunique'),
@@ -1257,7 +1363,6 @@ if page == "📚 Historique":
             'Moy_Mois_12M': ('Moy_Mois_12M','mean'),
             'Sorties_4M': ('Sorties_4M','sum'),
             'Moy_Mois_4M': ('Moy_Mois_4M','mean'),
-            'Rotation_actuelle_glob': ('Rotation_Actuelle','mean'),
             'Couverture_moy': ('Couverture','mean'),
             'Immobilisation_moy': ('Taux_Immob','mean'),
             'Dormant': ('Class', lambda s: (s=='Dormant').sum()),
@@ -1268,6 +1373,11 @@ if page == "📚 Historique":
             st.warning('Colonnes nécessaires à l\'analyse par catégorie manquantes.')
         else:
             grp = ana.groupby('Cat').agg(**{k: v for k,v in valid_aggs.items()}).reset_index()
+            # Rotation globale par catégorie = ratio d'agrégats, jamais une moyenne de ratios individuels
+            if {'Stock_total', 'Sorties_12M'}.issubset(grp.columns):
+                grp['Rotation_globale_cat'] = 0.0
+                m_grp = grp['Stock_total'] > SEUIL
+                grp.loc[m_grp, 'Rotation_globale_cat'] = (grp.loc[m_grp, 'Sorties_12M'] / grp.loc[m_grp, 'Stock_total']).round(2)
             st.dataframe(grp, use_container_width=True)
             add_export_buttons(grp, 'analyse_par_categorie', 'Par catégorie', date_max)
 
@@ -1303,9 +1413,29 @@ if page == "📚 Historique":
         n_rupture = int((ana['Class']=='Rupture').sum()) if 'Class' in ana.columns else 0
         n_sous_seuil = int((ana['Couverture'] <= 1).sum()) if 'Couverture' in ana.columns else 0
         n_dormant = int((ana['Class']=='Dormant').sum()) if 'Class' in ana.columns else 0
-        # Stock immobilisé: do NOT use price — present a physical metric
-        immobilise_phys = ana['Stock'].sum() if 'Stock' in ana.columns else 0
-        st.write({'Total références': total_refs, 'ABC-A': n_abc_a, 'XYZ-Z': n_xyz_z, 'AX': n_ax, 'Rupture': n_rupture, 'Sous seuil': n_sous_seuil, 'Dormant': n_dormant, 'Stock immobilisé (physique_unité)': immobilise_phys})
+        st.write({'Total références': total_refs, 'ABC-A': n_abc_a, 'XYZ-Z': n_xyz_z, 'AX': n_ax,
+                   'Rupture': n_rupture, 'Sous seuil (1 mois)': n_sous_seuil, 'Dormant': n_dormant})
+
+        # Stock immobilisé : AUCUNE valeur financière (pas de prix disponible → "Non disponible").
+        # Mesure physique uniquement, et jamais une somme brute entre unités différentes
+        # (m³, m², P, ML additionnés n'a pas de sens) : volume m³ + nb de références dormantes.
+        st.markdown('#### 🧱 Stock immobilisé (mesure physique)')
+        st.info("💰 Valeur financière du stock immobilisé : **Non disponible** — aucun prix unitaire fiable "
+                "dans les données actuelles.")
+        if {'Stock', 'Unite'}.issubset(ana.columns):
+            vol_m3 = ana.loc[ana['Unite'].astype(str).str.upper().eq('M3'), 'Stock'].sum()
+            dormant_refs = ana[ana['Class'] == 'Dormant'] if 'Class' in ana.columns else ana.iloc[0:0]
+            dormant_vol_m3 = dormant_refs.loc[dormant_refs['Unite'].astype(str).str.upper().eq('M3'), 'Stock'].sum() if not dormant_refs.empty else 0.0
+            ic1, ic2, ic3 = st.columns(3)
+            ic1.metric('Volume total en stock (m³)', format_nombre_fr(vol_m3, 2))
+            ic2.metric('Références dormantes', f"{len(dormant_refs):,}".replace(',', ' '))
+            ic3.metric('Volume dormant (m³)', format_nombre_fr(dormant_vol_m3, 2))
+            st.caption("Le stock exprimé dans d'autres unités (m², P, ML) n'est pas additionné au volume m³ "
+                       "— unités non convertibles entre elles. Détail par unité ci-dessous.")
+            st.dataframe(ana.groupby('Unite', as_index=False)['Stock'].sum().rename(
+                columns={'Unite': 'Unité', 'Stock': 'Stock total (unité native)'}), use_container_width=True)
+        else:
+            st.warning("Colonnes Stock / Unité manquantes — mesure physique du stock immobilisé non disponible.")
         st.markdown('#### TOP 10 (Sorties 12M)')
         if 'Sorties_12M' in ana.columns:
             st.dataframe(ana.sort_values('Sorties_12M', ascending=False).head(10)[[c for c in ['Référence','Designation','Cat','Sorties_12M','Stock'] if c in ana.columns]], use_container_width=True)
@@ -1392,18 +1522,23 @@ rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Uni
                'Dern_Sortie': 'Dern. Sortie'}
 
 if page == "📦 Réapprovisionnement":
-    st.caption("Aide à la décision : articles nécessitant une commande selon leur couverture. Le CUMP n'est pas utilisé.")
-    rep = f.copy()
-    rep['Action'] = rep['Couverture'].apply(replenishment_action)
-    rep['Priorité'] = rep['Couverture'].apply(
-        lambda v: '⚪ Sans sortie récente (4M)' if pd.isna(v) else
-        ('🔴 Articles critiques' if v < 1 else ('🟠 Réapprovisionnement conseillé' if v <= 2 else '🟢 Stock suffisant')))
+    st.caption("Aide à la décision basée sur les paramètres par catégorie (Délai d'approvisionnement, "
+               "Seuil de rupture, Stock de sécurité, Stock cible) définis dans ⚙️ Paramètres. Le CUMP n'est pas utilisé.")
+    _params = charger_parametres_stock()
+    if not _params:
+        st.warning("Aucun paramètre enregistré dans ⚙️ Paramètres — les valeurs par défaut sont utilisées "
+                   f"(Délai {DEFAULT_PARAMS_CATEGORIE['lead_time_mois']:.0f} mois, "
+                   f"Seuil de rupture {DEFAULT_PARAMS_CATEGORIE['seuil_rupture']:.0f} mois, "
+                   f"Stock de sécurité {DEFAULT_PARAMS_CATEGORIE['stock_securite']:.0f} mois, "
+                   f"Stock cible {DEFAULT_PARAMS_CATEGORIE['stock_cible']:.0f} mois).")
+    rep = calculer_moteur_reappro(f, _params)
+
     kc1, kc2, kc3, kc4 = st.columns(4)
     filters = {
-        '🔴 Articles critiques': rep[rep['Couverture'] < 1],
-        '🟠 Réapprovisionnement conseillé': rep[(rep['Couverture'] >= 1) & (rep['Couverture'] <= 2)],
-        '🟢 Stock suffisant': rep[rep['Couverture'] > 2],
-        '⚪ Sans sortie récente (4M)': rep[rep['Couverture'].isna()],
+        '🔴 Risque de rupture': rep[rep['Risque_Reappro'].str.startswith('🔴')],
+        '⚠️ Commander maintenant': rep[rep['Risque_Reappro'].str.startswith('⚠️')],
+        '🟢 Couverture suffisante': rep[rep['Risque_Reappro'].str.startswith('🟢')],
+        '⚪ Sans demande récente': rep[rep['Risque_Reappro'].str.startswith('⚪')],
     }
     for col, label in zip([kc1, kc2, kc3, kc4], filters):
         if col.button(f"{label}\n\n{len(filters[label])} article(s)", use_container_width=True):
@@ -1412,11 +1547,23 @@ if page == "📦 Réapprovisionnement":
     if selected_priority:
         st.info(f"Filtre actif : {selected_priority}")
         rep = filters[selected_priority]
-    rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Rotation_12M', 'Couverture', 'Class', 'Action']
-    rep_df = rep[rep_cols].rename(columns={'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel', 'Class': 'Classification', 'Couverture': 'Couverture (mois)', 'Rotation_12M': 'Rotation 12M historique'})
-    rep_df['Classification'] = badge_class(rep_df['Classification'])
+
+    rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Conso_Mensuelle_Moyenne',
+                'Couverture_Reappro', 'Delai_Appro_Mois', 'Seuil_Rupture_Mois', 'Stock_Securite_Mois',
+                'Stock_Cible_Mois', 'Sous_Stock_Securite', 'Risque_Reappro', 'Qte_Recommandee', 'Fiabilite']
+    rep_df = rep[[c for c in rep_cols if c in rep.columns]].rename(columns={
+        'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel',
+        'Conso_Mensuelle_Moyenne': 'Conso. mensuelle moy. (4M réels)', 'Couverture_Reappro': 'Couverture (mois)',
+        'Delai_Appro_Mois': "Délai d'appro (mois)", 'Seuil_Rupture_Mois': 'Seuil de rupture (mois)',
+        'Stock_Securite_Mois': 'Stock de sécurité (mois)', 'Stock_Cible_Mois': 'Stock cible (mois)',
+        'Sous_Stock_Securite': 'Sous le stock de sécurité', 'Risque_Reappro': 'Risque',
+        'Qte_Recommandee': 'Quantité recommandée', 'Fiabilite': 'Fiabilité',
+    })
     add_export_buttons(rep_df, 'reapprovisionnement', 'Réapprovisionnement', date_max)
-    st.dataframe(rep_df.sort_values('Couverture (mois)'), use_container_width=True, height=520)
+    st.dataframe(rep_df.sort_values('Couverture (mois)', na_position='first'), use_container_width=True, height=520)
+    st.caption("Quantité recommandée = max(0, Stock cible × Conso. mensuelle moyenne − Stock actuel). "
+               "Marquée « Non fiable » quand aucune sortie n'a eu lieu sur les 4 derniers mois — "
+               "la consommation moyenne n'est alors pas calculable à partir de données réelles.")
     st.stop()
 
 if page == "😴 Stock dormant":
@@ -1444,14 +1591,25 @@ if page == "🪵 Stock Bois Rouge":
     st.stop()
 
 if page == "⚠️ Alertes":
-    st.caption("Articles en rupture et articles dormants — mêmes filtres que l'analyse courante.")
-    alert_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'S_4M', 'Dern_Sortie']
-    alert_df = f[f['Class'].isin(['Rupture', 'Critique', 'Dormant', 'Sans mouvement'])][alert_cols].rename(columns={
+    st.caption("Articles en rupture et articles dormants, complétés par le risque de rupture calculé "
+               "à partir du Seuil de rupture et du Délai d'approvisionnement par catégorie (⚙️ Paramètres).")
+    _params_al = charger_parametres_stock()
+    f_risque = calculer_moteur_reappro(f, _params_al)
+    alert_df = f_risque[
+        f_risque['Class'].isin(['Rupture', 'Critique', 'Dormant', 'Sans mouvement'])
+        | f_risque['Risque_Reappro'].str.startswith('🔴')
+        | f_risque['Risque_Reappro'].str.startswith('⚠️')
+    ]
+    alert_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'Risque_Reappro',
+                  'S_12M', 'S_4M', 'Dern_Sortie']
+    alert_df = alert_df[[c for c in alert_cols if c in alert_df.columns]].rename(columns={
         'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité',
-        'Class': 'Classification', 'S_12M': 'Sorties 12M', 'S_4M': 'Sorties 4M', 'Dern_Sortie': 'Dern. Sortie'
+        'Class': 'Classification', 'Risque_Reappro': 'Risque de rupture (paramétré)',
+        'S_12M': 'Sorties 12M', 'S_4M': 'Sorties 4M', 'Dern_Sortie': 'Dern. Sortie'
     })
     if 'Classification' in alert_df.columns:
         alert_df['Classification'] = badge_class(alert_df['Classification']) if 'badge_class' in globals() else alert_df['Classification']
+    add_export_buttons(alert_df, 'alertes', 'Alertes', date_max)
     st.dataframe(alert_df, use_container_width=True, height=520)
     st.stop()
 
