@@ -179,8 +179,8 @@ def check_login():
     col1, col2, col3 = st.columns([1, 1.15, 1])
     with col2:
         with st.form("login_form"):
-            email = st.text_input("Email", placeholder="admin@woodmat.local")
-            pwd = st.text_input("Mot de passe", type="password")
+            email = st.text_input("Email", placeholder="admin@woodmat.local", key="login_email")
+            pwd = st.text_input("Mot de passe", type="password", key="login_password")
             submit = st.form_submit_button("Se connecter", use_container_width=True)
         st.caption("Compte initial : admin@woodmat.local / woodmat2026 — à modifier après la première connexion.")
         if submit:
@@ -212,10 +212,10 @@ def render_user_management():
     with st.expander("➕ Ajouter un utilisateur", expanded=True):
         with st.form("add_user"):
             c1, c2 = st.columns(2)
-            name = c1.text_input("Nom")
-            email = c2.text_input("Email")
-            role = c1.selectbox("Rôle", ["Direction", "Commercial", "Administrateur"])
-            pwd = c2.text_input("Mot de passe initial", type="password")
+            name = c1.text_input("Nom", key="admin_add_user_nom")
+            email = c2.text_input("Email", key="admin_add_user_email")
+            role = c1.selectbox("Rôle", ["Direction", "Commercial", "Administrateur"], key="admin_add_user_role")
+            pwd = c2.text_input("Mot de passe initial", type="password", key="admin_add_user_password")
             if st.form_submit_button("Créer l'utilisateur", type="primary"):
                 if not name or not email or not pwd:
                     st.error("Nom, email et mot de passe sont obligatoires.")
@@ -229,14 +229,14 @@ def render_user_management():
 
     display = pd.DataFrame([{k: u.get(k) for k in ["name", "email", "role", "created_at", "last_login", "status"]} for u in users])
     st.dataframe(display.rename(columns={"name":"Nom", "email":"Email", "role":"Rôle", "created_at":"Date de création", "last_login":"Dernière connexion", "status":"Statut"}), use_container_width=True)
-    selected = st.selectbox("Utilisateur à administrer", [u["email"] for u in users])
+    selected = st.selectbox("Utilisateur à administrer", [u["email"] for u in users], key="admin_select_user")
     user = next(u for u in users if u["email"] == selected)
     with st.form("edit_user"):
         c1, c2, c3 = st.columns(3)
-        new_name = c1.text_input("Nom", value=user.get("name", ""))
-        new_role = c2.selectbox("Rôle", ["Administrateur", "Direction", "Commercial"], index=["Administrateur", "Direction", "Commercial"].index(user.get("role", "Direction")))
-        new_status = c3.selectbox("Statut", ["Actif", "Désactivé"], index=0 if user.get("status") == "Actif" else 1)
-        new_pwd = st.text_input("Nouveau mot de passe (laisser vide pour ne pas changer)", type="password")
+        new_name = c1.text_input("Nom", value=user.get("name", ""), key="admin_edit_user_nom")
+        new_role = c2.selectbox("Rôle", ["Administrateur", "Direction", "Commercial"], index=["Administrateur", "Direction", "Commercial"].index(user.get("role", "Direction")), key="admin_edit_user_role")
+        new_status = c3.selectbox("Statut", ["Actif", "Désactivé"], index=0 if user.get("status") == "Actif" else 1, key="admin_edit_user_statut")
+        new_pwd = st.text_input("Nouveau mot de passe (laisser vide pour ne pas changer)", type="password", key="admin_edit_user_password")
         a, b, c = st.columns(3)
         save_btn = a.form_submit_button("Modifier")
         reset_btn = b.form_submit_button("Réinitialiser le mot de passe")
@@ -931,7 +931,7 @@ with st.sidebar:
     st.markdown("### 🪵 WOODMAT")
     st.caption(f"Connecté : {get_current_user().get('name', '')}")
     st.divider()
-    page = st.radio("Navigation", MENU_ITEMS, label_visibility="collapsed")
+    page = st.radio("Navigation", MENU_ITEMS, label_visibility="collapsed", key="nav_menu")
     st.divider()
     st.caption("La base historique 2020–2025 est intégrée à l'application — rien à importer.")
 
@@ -1052,7 +1052,7 @@ if page == "⚙️ Paramètres":
         st.info('Aucune catégorie détectée — générez d\'abord l\'analyse ou importez un stock.')
     else:
         try:
-            df_params = st.experimental_data_editor(pd.DataFrame(rows), num_rows='dynamic')
+            df_params = st.data_editor(pd.DataFrame(rows), num_rows='dynamic', key="params_data_editor")
         except Exception:
             # fallback simple editor
             st.warning('Éditeur interactif non disponible — utilisez les champs ci-dessous.')
@@ -1303,7 +1303,7 @@ if page == "📈 Analyses":
     with tab_pareto:
         st.markdown("### Pareto — valeur cumulée")
         cats = sorted(ana['Cat'].dropna().unique()) if 'Cat' in ana.columns else []
-        choice = st.selectbox("Filtrer par catégorie", options=['Toutes'] + cats)
+        choice = st.selectbox("Filtrer par catégorie", options=['Toutes'] + cats, key="analyse_pareto_categorie")
         dfp = ana.copy()
         if choice != 'Toutes':
             dfp = dfp[dfp['Cat'] == choice]
@@ -1338,17 +1338,79 @@ if page == "📈 Analyses":
         st.markdown('#### 🔥 TOP références (Rotation actuelle)')
         st.dataframe(top_rot, use_container_width=True)
 
-        # FLOP heuristic: faible sortie 12M (bottom 20%), stock élevé (top 30%), couverture élevée
-        thr_low = ana['Sorties_12M'].quantile(0.20) if 'Sorties_12M' in ana.columns else 0
-        thr_stock_high = ana['Stock'].quantile(0.70) if 'Stock' in ana.columns else 0
-        flop = ana[(ana['Sorties_12M'] <= thr_low) & (ana.get('Stock', 0) >= thr_stock_high)].copy()
-        flop_cols = [c for c in ['Référence','Designation','Cat','Sorties_12M','Stock','Couverture','Taux_Immob','Dern_Sortie'] if c in flop.columns]
-        if flop.empty:
-            st.info('Aucune référence répondant aux critères FLOP n\'a été trouvée.')
+        # ── FLOP — score multi-critères ──────────────────────────────────────
+        # Ne repose plus uniquement sur la Rotation. Chaque critère DISPONIBLE
+        # contribue un score 0-1 (rang percentile, sens "plus mauvais = plus
+        # proche de 1") ; les critères indisponibles sont exclus du score (pas
+        # inventés) et listés comme limitation.
+        flop = ana.copy()
+        criteres_utilises = []
+        criteres_absents = []
+        score_cols = []
+
+        def _pct_rank(s, ascending):
+            # rang percentile 0..1 ; ascending=True -> les valeurs FAIBLES obtiennent un score élevé
+            r = s.rank(pct=True, method='average')
+            return (1 - r) if ascending else r
+
+        if 'Sorties_12M' in flop.columns:
+            flop['Score_faible_sortie'] = _pct_rank(flop['Sorties_12M'], ascending=True)
+            score_cols.append('Score_faible_sortie')
+            criteres_utilises.append('Faible ou aucune sortie (12M)')
         else:
-            flop = flop[flop_cols].sort_values(['Sorties_12M','Stock'] if 'Sorties_12M' in flop.columns else ['Stock'], ascending=[True,False]).head(50)
-            st.markdown('#### ⚠️ FLOP (heuristique)')
-            st.dataframe(flop, use_container_width=True)
+            criteres_absents.append('Sorties 12M')
+
+        if 'Stock' in flop.columns:
+            flop['Score_stock_eleve'] = _pct_rank(flop['Stock'], ascending=False)
+            score_cols.append('Score_stock_eleve')
+            criteres_utilises.append('Stock élevé')
+        else:
+            criteres_absents.append('Stock')
+
+        if 'Couverture' in flop.columns:
+            flop['Score_couverture_elevee'] = _pct_rank(flop['Couverture'].fillna(0), ascending=False)
+            score_cols.append('Score_couverture_elevee')
+            criteres_utilises.append('Couverture élevée')
+        else:
+            criteres_absents.append('Couverture')
+
+        if 'Dern_Sortie' in flop.columns and date_max is not None:
+            _jours_depuis = (pd.Timestamp(date_max) - pd.to_datetime(flop['Dern_Sortie'], errors='coerce')).dt.days
+            flop['Jours_depuis_derniere_sortie'] = _jours_depuis
+            flop['Score_derniere_sortie_ancienne'] = _pct_rank(_jours_depuis.fillna(_jours_depuis.max() if _jours_depuis.notna().any() else 0), ascending=False)
+            score_cols.append('Score_derniere_sortie_ancienne')
+            criteres_utilises.append('Dernière sortie ancienne')
+        else:
+            criteres_absents.append('Date de dernière sortie')
+
+        if 'Taux_Immob' in flop.columns:
+            flop['Score_immobilisation'] = _pct_rank(flop['Taux_Immob'], ascending=False)
+            score_cols.append('Score_immobilisation')
+            criteres_utilises.append("Taux d'immobilisation élevé")
+        else:
+            criteres_absents.append("Taux d'immobilisation")
+
+        if not score_cols:
+            st.warning('Aucune colonne disponible pour calculer un score FLOP.')
+        else:
+            flop['Score_FLOP'] = flop[score_cols].mean(axis=1).round(3)
+
+            def _classe_flop(v):
+                if v >= 0.80:
+                    return '🔴 FLOP critique'
+                if v >= 0.60:
+                    return '🟠 FLOP probable'
+                return '🟡 À surveiller'
+
+            flop_cols_display = [c for c in ['Référence','Designation','Cat','Sorties_12M','Stock','Couverture',
+                                              'Taux_Immob','Dern_Sortie','Jours_depuis_derniere_sortie','Score_FLOP'] if c in flop.columns]
+            flop_top = flop.sort_values('Score_FLOP', ascending=False).head(50).copy()
+            flop_top['Classe_FLOP'] = flop_top['Score_FLOP'].apply(_classe_flop)
+            st.markdown('#### ⚠️ FLOP — score multi-critères')
+            st.caption(f"Critères utilisés : {', '.join(criteres_utilises)}." +
+                       (f" Non disponibles (exclus, jamais inventés) : {', '.join(criteres_absents)}." if criteres_absents else ""))
+            st.dataframe(flop_top[flop_cols_display + ['Classe_FLOP']], use_container_width=True)
+            add_export_buttons(flop_top[flop_cols_display + ['Classe_FLOP']], 'analyse_flop', 'FLOP', date_max)
 
     # ---------- Par catégorie ----------
     with tab_cat:
@@ -1363,6 +1425,8 @@ if page == "📈 Analyses":
             'Moy_Mois_12M': ('Moy_Mois_12M','mean'),
             'Sorties_4M': ('Sorties_4M','sum'),
             'Moy_Mois_4M': ('Moy_Mois_4M','mean'),
+            'Stock_moyen_12M_total': ('Stock_moyen_12M', 'sum'),
+            'Stock_moyen_4M_total': ('Stock_moyen_4M', 'sum'),
             'Couverture_moy': ('Couverture','mean'),
             'Immobilisation_moy': ('Taux_Immob','mean'),
             'Dormant': ('Class', lambda s: (s=='Dormant').sum()),
@@ -1373,19 +1437,33 @@ if page == "📈 Analyses":
             st.warning('Colonnes nécessaires à l\'analyse par catégorie manquantes.')
         else:
             grp = ana.groupby('Cat').agg(**{k: v for k,v in valid_aggs.items()}).reset_index()
-            # Rotation globale par catégorie = ratio d'agrégats, jamais une moyenne de ratios individuels
+            # Les 3 rotations par catégorie sont TOUJOURS des ratios d'agrégats
+            # (Σ Sorties ÷ Σ Stock de la catégorie), jamais une moyenne des rotations
+            # individuelles des références — cohérent avec le KPI Dashboard.
             if {'Stock_total', 'Sorties_12M'}.issubset(grp.columns):
-                grp['Rotation_globale_cat'] = 0.0
+                grp['Rotation_actuelle_cat'] = 0.0
                 m_grp = grp['Stock_total'] > SEUIL
-                grp.loc[m_grp, 'Rotation_globale_cat'] = (grp.loc[m_grp, 'Sorties_12M'] / grp.loc[m_grp, 'Stock_total']).round(2)
+                grp.loc[m_grp, 'Rotation_actuelle_cat'] = (grp.loc[m_grp, 'Sorties_12M'] / grp.loc[m_grp, 'Stock_total']).round(2)
+            if {'Stock_moyen_12M_total', 'Sorties_12M'}.issubset(grp.columns):
+                grp['Rotation_12M_historique_cat'] = 0.0
+                m_h12 = grp['Stock_moyen_12M_total'] > SEUIL
+                grp.loc[m_h12, 'Rotation_12M_historique_cat'] = (grp.loc[m_h12, 'Sorties_12M'] / grp.loc[m_h12, 'Stock_moyen_12M_total']).round(2)
+            if {'Stock_moyen_4M_total', 'Sorties_4M'}.issubset(grp.columns):
+                grp['Rotation_4M_cat'] = 0.0
+                m_h4 = grp['Stock_moyen_4M_total'] > SEUIL
+                grp.loc[m_h4, 'Rotation_4M_cat'] = (grp.loc[m_h4, 'Sorties_4M'] / grp.loc[m_h4, 'Stock_moyen_4M_total']).round(2)
             st.dataframe(grp, use_container_width=True)
+            st.caption("Rotation actuelle = Σ Sorties 12M ÷ Σ Stock actuel de la catégorie. "
+                       "Rotation 12M historique = Σ Sorties 12M ÷ Σ Stock moyen 12M de la catégorie. "
+                       "Rotation 4M = Σ Sorties 4M ÷ Σ Stock moyen 4M de la catégorie. "
+                       "Les 3 sont des ratios d'agrégats, jamais des moyennes de rotations individuelles.")
             add_export_buttons(grp, 'analyse_par_categorie', 'Par catégorie', date_max)
 
     # ---------- Évolution mensuelle ----------
     with tab_evo:
         st.markdown('### Évolution mensuelle (12 derniers mois)')
-        refs_filter = st.selectbox('Filtrer par référence (optionnel)', options=['Toutes'] + sorted(ana['Référence'].astype(str).unique()) if 'Référence' in ana.columns else ['Toutes'])
-        cats_filter = st.selectbox('Filtrer par catégorie', options=['Toutes'] + sorted(ana['Cat'].dropna().unique()) if 'Cat' in ana.columns else ['Toutes'])
+        refs_filter = st.selectbox('Filtrer par référence (optionnel)', options=['Toutes'] + sorted(ana['Référence'].astype(str).unique()) if 'Référence' in ana.columns else ['Toutes'], key="analyse_evolution_reference")
+        cats_filter = st.selectbox('Filtrer par catégorie', options=['Toutes'] + sorted(ana['Cat'].dropna().unique()) if 'Cat' in ana.columns else ['Toutes'], key="analyse_evolution_categorie")
         evo_df = evolution_mensuelle(df_mv, None)
         if refs_filter != 'Toutes':
             evo_df = evolution_mensuelle(df_mv, [refs_filter])
@@ -1411,10 +1489,24 @@ if page == "📈 Analyses":
         n_xyz_z = df_xyz[df_xyz['Classe_XYZ'].astype(str).str.startswith('Z')]['Référence'].nunique() if not df_xyz.empty else 0
         n_ax = merged[(merged['Classe_ABC']=='A') & (merged['Classe_XYZ'].astype(str).str.startswith('X'))]['Référence'].nunique() if 'merged' in locals() and not merged.empty else 0
         n_rupture = int((ana['Class']=='Rupture').sum()) if 'Class' in ana.columns else 0
-        n_sous_seuil = int((ana['Couverture'] <= 1).sum()) if 'Couverture' in ana.columns else 0
         n_dormant = int((ana['Class']=='Dormant').sum()) if 'Class' in ana.columns else 0
+
+        # « Références sous seuil » : ne dépend plus d'une valeur fixe de 1 mois.
+        # Utilise le Seuil de rupture RÉEL de chaque catégorie (⚙️ Paramètres /
+        # parametres_stock.json), via le même moteur que Réapprovisionnement/Alertes.
+        _params_synth = charger_parametres_stock()
+        if {'Cat', 'Stock'}.issubset(ana.columns):
+            _reappro_synth = calculer_moteur_reappro(ana, _params_synth)
+            n_sous_seuil = int(_reappro_synth['Risque_Reappro'].astype(str).str.startswith('🔴').sum())
+            seuil_label = "Sous seuil de rupture (par catégorie)"
+        else:
+            n_sous_seuil = 0
+            seuil_label = "Sous seuil de rupture (non calculable)"
+
         st.write({'Total références': total_refs, 'ABC-A': n_abc_a, 'XYZ-Z': n_xyz_z, 'AX': n_ax,
-                   'Rupture': n_rupture, 'Sous seuil (1 mois)': n_sous_seuil, 'Dormant': n_dormant})
+                   'Rupture': n_rupture, seuil_label: n_sous_seuil, 'Dormant': n_dormant})
+        st.caption("« Sous seuil » utilise désormais le Seuil de rupture propre à chaque catégorie "
+                   "(⚙️ Paramètres), et non plus une valeur fixe de 1 mois pour toutes les catégories.")
 
         # Stock immobilisé : AUCUNE valeur financière (pas de prix disponible → "Non disponible").
         # Mesure physique uniquement, et jamais une somme brute entre unités différentes
@@ -1441,9 +1533,9 @@ if page == "📈 Analyses":
             st.dataframe(ana.sort_values('Sorties_12M', ascending=False).head(10)[[c for c in ['Référence','Designation','Cat','Sorties_12M','Stock'] if c in ana.columns]], use_container_width=True)
         else:
             st.info('Sorties 12M non disponibles — TOP non calculable.')
-        st.markdown('#### FLOP 10 (heuristique)')
-        if 'flop' in locals() and not flop.empty:
-            st.dataframe(flop.head(10), use_container_width=True)
+        st.markdown('#### FLOP 10 (score multi-critères)')
+        if 'flop_top' in locals() and not flop_top.empty:
+            st.dataframe(flop_top[flop_cols_display + ['Classe_FLOP']].head(10), use_container_width=True)
         else:
             st.info('Pas de FLOP calculable avec les données disponibles.')
 
@@ -1470,18 +1562,18 @@ fc1, fc2, fc3 = st.columns([2, 2, 2])
 fc4, fc5 = st.columns([2, 2])
 with fc1:
     cats = sorted(sm['Cat'].dropna().unique())
-    sel_cats = st.multiselect("Catégorie", cats, default=[])
+    sel_cats = st.multiselect("Catégorie", cats, default=[], key="filtre_principal_categorie")
 with fc2:
     classes = sorted(sm['Class'].unique())
-    sel_class = st.multiselect("Classification", classes, default=[])
+    sel_class = st.multiselect("Classification", classes, default=[], key="filtre_principal_classification")
 with fc3:
     unites = sorted(sm['Unite'].dropna().astype(str).unique())
-    sel_unites = st.multiselect("Unité", unites, default=[])
+    sel_unites = st.multiselect("Unité", unites, default=[], key="filtre_principal_unite")
 with fc4:
     references = sorted(sm['Référence'].dropna().astype(str).unique())
-    sel_refs = st.multiselect("Référence", references, default=[])
+    sel_refs = st.multiselect("Référence", references, default=[], key="filtre_principal_reference")
 with fc5:
-    recherche = st.text_input("🔍 Recherche référence ou désignation")
+    recherche = st.text_input("🔍 Recherche référence ou désignation", key="filtre_principal_recherche")
 
 f = sm.copy()
 if sel_cats:
@@ -1704,6 +1796,25 @@ with k2:
         f"{rot_moy:.2f} tours/an" if pd.notna(rot_moy) else "—",
         help="Sorties des 12 derniers mois ÷ Stock ACTUEL total de la catégorie. KPI de référence du Dashboard — inchangé.")
     st.markdown("<div class='woodmat-muted'>Calcul sur les 12 derniers mois — stock actuel</div>", unsafe_allow_html=True)
+
+# ── Audit temporaire du KPI "Rotation du stock" ──────────
+# Permet de vérifier à l'écran les totaux exacts utilisés par le calcul et les
+# filtres actifs, pour comprendre pourquoi la valeur affichée est celle qu'elle est.
+with st.expander("🔎 Audit — Rotation du stock (diagnostic temporaire)", expanded=False):
+    st.write({
+        'Total Sorties 12M (Σ S_12M, Stock > seuil)': format_nombre_fr(_base_rot['S_12M'].sum(), 3),
+        'Total Stock actuel (Σ Stock, Stock > seuil)': format_nombre_fr(_base_rot['Stock'].sum(), 3),
+        'Rotation calculée (Σ Sorties 12M ÷ Σ Stock actuel)': f"{rot_moy:.2f}" if pd.notna(rot_moy) else "—",
+        'Nb références incluses (Stock > seuil)': int(len(_base_rot)),
+        'Nb références filtrées (total vue courante)': int(len(f)),
+        'Filtres actifs': {
+            'Catégorie': sel_cats if sel_cats else 'Toutes',
+            'Classification': sel_class if sel_class else 'Toutes',
+            'Unité': sel_unites if sel_unites else 'Toutes',
+            'Référence': f'{len(sel_refs)} sélectionnée(s)' if sel_refs else 'Toutes',
+            'Recherche': recherche or 'Aucune',
+        },
+    })
 with k3:
     st.metric(
         "⚠️ Alertes",
@@ -1801,7 +1912,7 @@ with tab3:
                "par référence, année par année — même filtres que le tableau principal.")
 
     vue = st.radio("Vue", ["Sorties par année", "Achats/Entrées par année", "Nb transactions par année"],
-                    horizontal=True)
+                    horizontal=True, key="historique_vue_annee")
     if vue == "Sorties par année":
         cols_show = s_cols
     elif vue == "Achats/Entrées par année":
