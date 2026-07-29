@@ -47,146 +47,59 @@ def inject_global_styles():
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
-
         :root {
-            --wm-paper: #EDE7DA;
-            --wm-panel: #F8F5EE;
-            --wm-ink: #241C13;
-            --wm-ink-soft: #6B5F4D;
-            --wm-brass: #A6672B;
-            --wm-brass-dark: #7D4C1E;
-            --wm-steel: #2B4A5C;
-            --wm-steel-dark: #182F3B;
-            --wm-line: rgba(36, 28, 19, 0.14);
-            --wm-shadow: rgba(36, 28, 19, 0.10);
-            --woodmat-blue: var(--wm-steel);
-            --woodmat-gold: var(--wm-brass);
-            --woodmat-border: var(--wm-line);
+            --woodmat-blue: #1F3864;
+            --woodmat-blue-dark: #13233F;
+            --woodmat-gold: #B88A44;
+            --woodmat-bg: #F5F7FB;
+            --woodmat-card: #FFFFFF;
+            --woodmat-border: rgba(31, 56, 100, 0.14);
         }
-
-        html, body, .stApp { background: var(--wm-paper); color: var(--wm-ink); }
-        .stApp {
-            background-image:
-                repeating-linear-gradient(115deg, rgba(36,28,19,0.025) 0px, rgba(36,28,19,0.025) 1px, transparent 1px, transparent 34px);
-        }
-        * { font-family: 'Inter', sans-serif; }
-        h1, h2, h3, .woodmat-page-title, .woodmat-header-title, .woodmat-kpi-title, .woodmat-section-title {
-            font-family: 'Fraunces', serif !important; letter-spacing: -0.01em;
-        }
-        .woodmat-kpi-value, [data-testid="stMetricValue"], .stDataFrame, [data-testid="stDataFrame"] * {
-            font-variant-numeric: tabular-nums;
-        }
-        .woodmat-kpi-value { font-family: 'IBM Plex Mono', monospace !important; letter-spacing: -0.02em; }
-
+        .stApp { background: var(--woodmat-bg); }
         [data-testid="stSidebar"] {
-            background: linear-gradient(195deg, var(--wm-steel-dark) 0%, var(--wm-steel) 100%);
-            border-right: 1px solid rgba(0,0,0,0.25);
+            background: linear-gradient(180deg, #13233F 0%, #1F3864 100%);
         }
-        [data-testid="stSidebar"] * { color: #F3EFE6 !important; }
-        [data-testid="stSidebar"] .stRadio label {
-            border-radius: 10px; padding: 0.4rem 0.6rem; transition: background 0.15s ease;
-        }
-        [data-testid="stSidebar"] .stRadio label:hover { background: rgba(243,239,230,0.08); }
-        [data-testid="stSidebar"] .stRadio [data-baseweb="radio"] div:first-child { border-color: var(--wm-brass) !important; }
-        [data-testid="stSidebar"] hr { border-color: rgba(243,239,230,0.16); }
+        [data-testid="stSidebar"] * { color: #F8FAFC !important; }
         [data-testid="stSidebar"] .stButton > button, [data-testid="stSidebar"] button {
-            border-radius: 10px; border: 1px solid rgba(243,239,230,0.25) !important;
-            background: rgba(243,239,230,0.06) !important;
+            border-radius: 12px;
         }
-        [data-testid="stSidebar"] .stButton > button:hover { background: var(--wm-brass) !important; border-color: var(--wm-brass) !important; }
-
         .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
-
-        /* Boutons, champs, onglets natifs Streamlit */
-        .stButton > button {
-            border-radius: 8px; border: 1px solid var(--wm-line); background: var(--wm-panel);
-            color: var(--wm-ink); font-weight: 600; transition: all 0.15s ease;
-        }
-        .stButton > button:hover { border-color: var(--wm-brass); color: var(--wm-brass-dark); }
-        .stButton > button[kind="primary"] {
-            background: var(--wm-brass); border-color: var(--wm-brass-dark); color: #FBF8F2;
-        }
-        .stButton > button[kind="primary"]:hover { background: var(--wm-brass-dark); }
-
-        [data-testid="stTabs"] [data-baseweb="tab-list"] {
-            gap: 4px; border-bottom: 2px solid var(--wm-line);
-        }
-        [data-testid="stTabs"] [data-baseweb="tab"] {
-            border-radius: 10px 10px 0 0; padding: 0.55rem 1rem; font-weight: 600; color: var(--wm-ink-soft);
-        }
-        [data-testid="stTabs"] [aria-selected="true"] {
-            background: var(--wm-panel); color: var(--wm-brass-dark) !important;
-            border: 1px solid var(--wm-line); border-bottom: 2px solid var(--wm-panel);
-        }
-
-        [data-testid="stDataFrame"] { border: 1px solid var(--wm-line); border-radius: 12px; overflow: hidden; }
-        [data-testid="stDataFrame"] [role="columnheader"] {
-            background: var(--wm-steel) !important; color: #F3EFE6 !important; font-weight: 600 !important;
-        }
-
-        [data-testid="stMetric"] {
-            background: var(--wm-panel); border: 1px solid var(--wm-line); border-radius: 14px;
-            padding: 0.8rem 1rem; box-shadow: 0 6px 18px var(--wm-shadow);
-        }
-        [data-testid="stMetricValue"] { color: var(--wm-ink); font-family: 'IBM Plex Mono', monospace; }
-        [data-testid="stMetricLabel"] { color: var(--wm-ink-soft); }
-
-        [data-testid="stExpander"] { border: 1px solid var(--wm-line); border-radius: 12px; background: var(--wm-panel); }
-
-        input, textarea, select, .stSelectbox div, .stMultiSelect div, .stNumberInput input {
-            border-radius: 8px !important;
-        }
-        .stSlider [data-baseweb="slider"] div[role="slider"] { background-color: var(--wm-brass) !important; }
-
-        /* Éléments maison WOODMAT */
         .woodmat-login-shell {
             max-width: 460px; margin: 7vh auto 0; padding: 2.2rem;
-            background: var(--wm-panel); border: 1px solid var(--wm-line);
-            border-radius: 16px; box-shadow: 0 20px 60px var(--wm-shadow);
+            background: #FFFFFF; border: 1px solid var(--woodmat-border);
+            border-radius: 22px; box-shadow: 0 20px 60px rgba(19,35,63,0.14);
         }
         .woodmat-logo {
-            width: 64px; height: 64px; border-radius: 12px; margin: 0 auto 0.8rem;
+            width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 0.8rem;
             display: flex; align-items: center; justify-content: center;
-            background: linear-gradient(135deg, var(--wm-steel), var(--wm-brass));
-            color: #FBF8F2; font-size: 1.7rem; font-weight: 700; font-family: 'Fraunces', serif;
-            box-shadow: inset 0 0 0 3px rgba(251,248,242,0.18);
+            background: linear-gradient(135deg, var(--woodmat-blue), var(--woodmat-gold));
+            color: white; font-size: 1.8rem; font-weight: 800;
         }
         .woodmat-header {
             position: sticky; top: 0; z-index: 50; margin-bottom: 1.2rem;
             display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-            padding: 0.85rem 1.1rem; background: rgba(248,245,238,0.94);
-            border: 1px solid var(--wm-line); border-left: 4px solid var(--wm-brass); border-radius: 12px;
-            box-shadow: 0 8px 24px var(--wm-shadow); backdrop-filter: blur(8px);
+            padding: 0.85rem 1.1rem; background: rgba(255,255,255,0.95);
+            border: 1px solid var(--woodmat-border); border-radius: 18px;
+            box-shadow: 0 8px 24px rgba(19,35,63,0.07); backdrop-filter: blur(8px);
         }
-        .woodmat-header-title { color: var(--wm-ink); font-weight: 700; font-size: 1.12rem; }
-        .woodmat-header-meta { color: var(--wm-ink-soft); font-size: 0.87rem; text-align: right; font-family: 'IBM Plex Mono', monospace; }
-        .woodmat-page-title {
-            color: var(--wm-ink); margin: 0 0 0.35rem; font-weight: 700; position: relative;
-            padding-left: 0.85rem; border-left: 4px solid var(--wm-brass);
-        }
+        .woodmat-header-title { color: var(--woodmat-blue); font-weight: 800; font-size: 1.1rem; }
+        .woodmat-header-meta { color: #64748B; font-size: 0.9rem; text-align: right; }
+        .woodmat-page-title { color: var(--woodmat-blue); margin: 0 0 0.25rem; font-weight: 800; }
         .woodmat-panel, .woodmat-kpi-card {
-            background: var(--wm-panel); border: 1px solid var(--wm-line);
-            border-radius: 14px; padding: 1rem 1.1rem;
-            box-shadow: 0 6px 18px var(--wm-shadow);
+            background: var(--woodmat-card); border: 1px solid var(--woodmat-border);
+            border-radius: 18px; padding: 1rem 1.1rem;
+            box-shadow: 0 8px 24px rgba(19,35,63,0.06);
         }
-        .woodmat-kpi-card {
-            min-height: 150px; position: relative; border-top: 3px solid var(--wm-brass);
-        }
-        .woodmat-kpi-title {
-            color: var(--wm-ink-soft); font-size: 0.82rem; font-weight: 600; margin-bottom: 0.5rem;
-            text-transform: uppercase; letter-spacing: 0.06em; font-family: 'Inter', sans-serif !important;
-        }
-        .woodmat-kpi-value { color: var(--wm-ink); font-size: 1.5rem; font-weight: 700; line-height: 1.3; }
-        .woodmat-kpi-detail { color: var(--wm-ink-soft); font-size: 0.93rem; line-height: 1.45; margin-top: 0.15rem; }
-        .woodmat-muted { color: var(--wm-ink-soft); font-size: 0.9rem; line-height: 1.35; margin-top: 0.35rem; }
-        .woodmat-section-title {
-            color: var(--wm-ink); font-size: 1.1rem; font-weight: 700; margin-bottom: 0.1rem;
-        }
-        .woodmat-legend { color: var(--wm-ink-soft); font-size: 0.86rem; line-height: 1.45; margin-top: 0.35rem; }
+        .woodmat-kpi-card { min-height: 150px; }
+        .woodmat-kpi-title { color: var(--woodmat-blue); font-size: 0.95rem; font-weight: 700; margin-bottom: 0.45rem; }
+        .woodmat-kpi-value { color: #202A35; font-size: 1.55rem; font-weight: 800; line-height: 1.35; }
+        .woodmat-kpi-detail { color: #555; font-size: 0.95rem; line-height: 1.45; margin-top: 0.15rem; }
+        .woodmat-muted { color: #64748B; font-size: 0.9rem; line-height: 1.35; margin-top: 0.35rem; }
+        .woodmat-section-title { color: var(--woodmat-blue); font-size: 1.08rem; font-weight: 800; margin-bottom: 0.1rem; }
+        .woodmat-legend { color: #666; font-size: 0.86rem; line-height: 1.45; margin-top: 0.35rem; }
         .woodmat-coming-soon {
-            border: 1px dashed var(--wm-ink-soft); border-radius: 14px; padding: 1.2rem;
-            background: rgba(248,245,238,0.7); color: var(--wm-ink-soft);
+            border: 1px dashed rgba(31,56,100,0.28); border-radius: 18px; padding: 1.2rem;
+            background: rgba(255,255,255,0.75); color: #475569;
         }
         @media (max-width: 768px) { .woodmat-header { flex-direction: column; align-items: flex-start; } .woodmat-header-meta { text-align: left; } }
         </style>
