@@ -383,7 +383,11 @@ def calculer_indicateurs(df_mv, df_st_bytes):
         Stock=('Qty_s', 'sum'), Cat=('Catégorie', 'first'), Unite=('Unité', 'first'),
         Designation=('Désignation', 'first')).reset_index()
     df_st_c = df_st_c[df_st_c['Cat'].notna()]
-    df_st_c.loc[df_st_c['Cat'].isin(['BOIS BLANC', 'BOIS ROUGE']), 'Unite'] = 'M3'
+    # Par défaut BOIS BLANC/BOIS ROUGE sont en M3, mais certaines références (ex: SCHAAL)
+    # sont réellement vendues en ML — on ne force M3 que si l'unité réelle n'est ni M3 ni ML,
+    # pour ne pas écraser une unité déjà correcte (ex: HOLMEN_25X100_MB-SCHAAL en ML).
+    _unite_reconnue = df_st_c['Unite'].astype(str).str.upper().isin(['M3', 'M³', 'ML', 'M/L', 'M.L'])
+    df_st_c.loc[df_st_c['Cat'].isin(['BOIS BLANC', 'BOIS ROUGE']) & ~_unite_reconnue, 'Unite'] = 'M3'
 
     date_max = df_mv['Date'].max()
     date_12m_debut = date_max - pd.DateOffset(months=12)
