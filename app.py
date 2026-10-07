@@ -729,14 +729,16 @@ def charger_parametres_stock():
 
 def get_params_categorie(cat, params):
     """Paramètres effectifs par catégorie.
-    Délai standard commande → arrivée = 2 mois, sauf BOIS ROUGE = 1 mois.
-    Une valeur explicitement enregistrée dans parametres_stock.json reste prioritaire.
+    Règle métier WOODMAT : délai commande → arrivée = 1 mois pour BOIS ROUGE,
+    2 mois pour toutes les autres catégories. Cette règle est fixe et prime
+    sur toute ancienne valeur de lead_time_mois enregistrée dans le JSON.
+    Les autres paramètres restent personnalisables par catégorie.
     """
     p = (params or {}).get(cat, {})
     cat_norm = str(cat).strip().upper()
-    default_lead = 1.0 if cat_norm == 'BOIS ROUGE' else DEFAULT_PARAMS_CATEGORIE['lead_time_mois']
+    delai_appro = 1.0 if cat_norm == 'BOIS ROUGE' else 2.0
     return {
-        'delai_appro_mois': float(p.get('lead_time_mois', default_lead)),
+        'delai_appro_mois': delai_appro,
         'seuil_rupture_mois': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
         'stock_securite_mois': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
         'stock_cible_mois': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible'])),
