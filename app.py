@@ -27,7 +27,7 @@ SEUIL = 0.001
 #    aucun paramètre n'a encore été saisi pour une catégorie dans la page Paramètres.
 #    Jamais déduites des données : ce sont des constantes documentées. ──
 DEFAULT_PARAMS_CATEGORIE = {
-    'lead_time_mois': 1.0,      # Délai d'approvisionnement (mois)
+    'lead_time_mois': 2.0,      # Délai standard commande → arrivée (mois)
     'seuil_rupture': 1.0,       # Seuil de rupture (mois)
     'stock_securite': 0.0,      # Stock de sécurité (mois)
     'stock_cible': 3.0,         # Stock cible (mois)
@@ -728,11 +728,15 @@ def charger_parametres_stock():
 
 
 def get_params_categorie(cat, params):
-    """Paramètres effectifs d'une catégorie : valeurs saisies dans Paramètres,
-    sinon repli sur DEFAULT_PARAMS_CATEGORIE (jamais déduites des données)."""
+    """Paramètres effectifs par catégorie.
+    Délai standard commande → arrivée = 2 mois, sauf BOIS ROUGE = 1 mois.
+    Une valeur explicitement enregistrée dans parametres_stock.json reste prioritaire.
+    """
     p = (params or {}).get(cat, {})
+    cat_norm = str(cat).strip().upper()
+    default_lead = 1.0 if cat_norm == 'BOIS ROUGE' else DEFAULT_PARAMS_CATEGORIE['lead_time_mois']
     return {
-        'delai_appro_mois': float(p.get('lead_time_mois', DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])),
+        'delai_appro_mois': float(p.get('lead_time_mois', default_lead)),
         'seuil_rupture_mois': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
         'stock_securite_mois': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
         'stock_cible_mois': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible'])),
@@ -1031,7 +1035,8 @@ if not os.path.exists(BASE_HISTORIQUE):
 inject_global_styles()
 
 MENU_ITEMS = [
-    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚙️ Paramètres", "⚠️ Alertes",
+    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📊 Tableau croisé stock",
+    "📈 Analyses", "⚙️ Paramètres", "⚠️ Alertes",
     "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"
 ]
 if user_can_manage_users():
@@ -1049,7 +1054,7 @@ with st.sidebar:
     f_stock = None
     lancer = False
     # Show uploaders only on pages that need data imports/analysis generation.
-    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"]:
+    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📊 Tableau croisé stock", "📈 Analyses", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"]:
         st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
         f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
 
@@ -1152,7 +1157,7 @@ if page == "⚙️ Paramètres":
         p = params.get(c, {})
         rows.append({
             'Catégorie': c,
-            'lead_time_mois': int(p.get('lead_time_mois', DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])),
+            'lead_time_mois': int(p.get('lead_time_mois', 1 if str(c).strip().upper() == 'BOIS ROUGE' else DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])),
             'stock_securite': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
             'seuil_rupture': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
             'stock_cible': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible']))
@@ -1202,6 +1207,89 @@ if page == "⚙️ Paramètres":
                     st.error('Impossible de supprimer le fichier de paramètres.')
             st.session_state.pop('parametres_stock', None)
             st.success('Paramètres réinitialisés.')
+    st.stop()
+
+if page == "📊 Tableau croisé stock":
+    st.markdown("<h2 class='woodmat-page-title'>📊 Tableau croisé stock</h2>", unsafe_allow_html=True)
+    df_st_raw = st.session_state.get('df_st_raw')
+    if df_st_raw is None or df_st_raw.empty:
+        st.info("Générez d'abord l'analyse avec le fichier Stock actuel.")
+        st.stop()
+
+    # Tableau croisé métier WOODMAT :
+    # Lignes = Dimension
+    # Colonnes = Fournisseur puis Couleur
+    # Valeurs = Somme de Quantité
+    def _find_col(df, candidates):
+        mapping = {str(c).strip().upper(): c for c in df.columns}
+        for candidate in candidates:
+            if candidate.upper() in mapping:
+                return mapping[candidate.upper()]
+        return None
+
+    dim_col = _find_col(df_st_raw, ['Dimension', 'Dimensions'])
+    if dim_col is None:
+        dim_col = _find_col(df_st_raw, ['Texte 5', 'Texte5'])
+    four_col = _find_col(df_st_raw, ['Fournisseur', 'Supplier'])
+    color_col = _find_col(df_st_raw, ['Couleur', 'Color'])
+    qty_col = _find_col(df_st_raw, ['Quantité', 'Quantite', 'Quantity'])
+
+    if dim_col is None or four_col is None or color_col is None or qty_col is None:
+        st.error("Impossible de construire le tableau croisé : il manque au moins une colonne Dimension, Fournisseur, Couleur ou Quantité dans le stock actuel.")
+        st.write({"Colonnes détectées": list(df_st_raw.columns)})
+        st.stop()
+
+    pivot_src = df_st_raw[[dim_col, four_col, color_col, qty_col]].copy()
+    pivot_src.columns = ['Dimension', 'Fournisseur', 'Couleur', 'Quantité']
+    pivot_src['Quantité'] = parse_qty_series(pivot_src['Quantité'])
+    pivot_src = pivot_src[pivot_src['Quantité'].notna()].copy()
+    pivot_src['Dimension'] = pivot_src['Dimension'].fillna('INCONNUE').astype(str).str.strip()
+    pivot_src['Fournisseur'] = pivot_src['Fournisseur'].fillna('INCONNU').astype(str).str.strip()
+    pivot_src['Couleur'] = pivot_src['Couleur'].fillna('INCONNUE').astype(str).str.strip()
+
+    categories_pivot = _find_col(df_st_raw, ['Catégorie', 'Categorie', 'Category'])
+    if categories_pivot:
+        pivot_src['Catégorie'] = df_st_raw.loc[pivot_src.index, categories_pivot].fillna('INCONNUE').astype(str).str.strip()
+        cats_pivot = sorted(pivot_src['Catégorie'].unique())
+        cat_choice = st.selectbox("Catégorie", ['Toutes'] + cats_pivot, key="pivot_stock_categorie")
+        if cat_choice != 'Toutes':
+            pivot_src = pivot_src[pivot_src['Catégorie'] == cat_choice]
+
+    pivot = pd.pivot_table(
+        pivot_src,
+        index='Dimension',
+        columns=['Fournisseur', 'Couleur'],
+        values='Quantité',
+        aggfunc='sum',
+        fill_value=0,
+        margins=True,
+        margins_name='TOTAL'
+    )
+
+    # Tri naturel des dimensions : 2800X2100 avant 3050X1200, etc.
+    def _dim_sort_key(v):
+        nums = _re.findall(r'\d+', str(v))
+        return [int(x) for x in nums] if nums else [999999]
+
+    if 'TOTAL' in pivot.index:
+        total_row = pivot.loc[['TOTAL']]
+        body = pivot.drop(index='TOTAL')
+        body = body.sort_index(key=lambda s: s.map(_dim_sort_key))
+        pivot = pd.concat([body, total_row])
+
+    pivot_display = pivot.copy()
+    if isinstance(pivot_display.columns, pd.MultiIndex):
+        pivot_display.columns = [
+            'TOTAL' if str(a) == 'TOTAL' and str(b) == '' else f"{a} | {b}"
+            for a, b in pivot_display.columns
+        ]
+    pivot_display = pivot_display.reset_index()
+    pivot_display = pivot_display.round(3)
+
+    st.caption("Lignes = Dimension · Colonnes = Fournisseur → Couleur · Valeurs = Somme de Quantité")
+    add_export_buttons(pivot_display, 'tableau_croise_stock', 'Stock croisé', date_max)
+    st.dataframe(pivot_display, use_container_width=True, height=560)
+
     st.stop()
 
 if page == "📚 Historique":
@@ -1713,7 +1801,7 @@ st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=Tru
 display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class',
                  'S_12M', 'Moy_Mois_12M', 'S_4M', 'Moy_Mois_4M',
                  'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label',
-                 'Couverture', 'Taux_Immob', 'Dern_Sortie']
+                 'Couverture', 'Taux_Immob', 'Dern_Sortie', 'Dern_Entree']
 rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
                'S_12M': 'Sorties 12M', 'Moy_Mois_12M': 'Moy/Mois 12M',
                'S_4M': 'Sorties 4M', 'Moy_Mois_4M': 'Moy/Mois 4M',
@@ -1721,7 +1809,7 @@ rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Uni
                'Rotation_4M': 'Rotation 4M',
                'Tendance_Label': 'Tendance 4M vs 12M',
                'Couverture': 'Couv. (mois)', 'Taux_Immob': 'Immob. (%)',
-               'Dern_Sortie': 'Dern. Sortie'}
+               'Dern_Sortie': 'Dern. Sortie', 'Dern_Entree': 'Dern. Entrée'}
 
 if page == "📦 Réapprovisionnement":
     st.caption("Aide à la décision basée sur les paramètres par catégorie (Délai d'approvisionnement, "
