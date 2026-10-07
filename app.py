@@ -1227,11 +1227,11 @@ if page == "📊 Tableau croisé stock":
                 return mapping[candidate.upper()]
         return None
 
-    dim_col = _find_col(df_st_raw, ['Dimension', 'Dimensions'])
-    if dim_col is None:
-        dim_col = _find_col(df_st_raw, ['Texte 5', 'Texte5'])
-    four_col = _find_col(df_st_raw, ['Fournisseur', 'Supplier'])
-    color_col = _find_col(df_st_raw, ['Couleur', 'Color'])
+    # Dans le fichier stock WOODMAT :
+    # Texte 2 = Couleur, Texte 3 = Fournisseur, Texte 5 = Dimension.
+    dim_col = _find_col(df_st_raw, ['Texte 5', 'Texte5', 'Dimension', 'Dimensions'])
+    four_col = _find_col(df_st_raw, ['Texte 3', 'Texte3', 'Fournisseur', 'Supplier'])
+    color_col = _find_col(df_st_raw, ['Texte 2', 'Texte2', 'Couleur', 'Color'])
     qty_col = _find_col(df_st_raw, ['Quantité', 'Quantite', 'Quantity'])
 
     if dim_col is None or four_col is None or color_col is None or qty_col is None:
