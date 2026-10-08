@@ -27,11 +27,21 @@ SEUIL = 0.001
 #    aucun paramètre n'a encore été saisi pour une catégorie dans la page Paramètres.
 #    Jamais déduites des données : ce sont des constantes documentées. ──
 DEFAULT_PARAMS_CATEGORIE = {
-    'lead_time_mois': 2.0,      # Délai standard commande → arrivée (mois)
+    'lead_time_mois': 2.0,      # Délai d'approvisionnement (mois) : date de commande → arrivée
     'seuil_rupture': 1.0,       # Seuil de rupture (mois)
     'stock_securite': 0.0,      # Stock de sécurité (mois)
     'stock_cible': 3.0,         # Stock cible (mois)
 }
+
+# Exception métier : le BOIS ROUGE arrive 1 mois après la commande (2 mois pour tous les autres produits).
+DEFAULT_LEAD_TIME_PAR_CATEGORIE = {'BOIS ROUGE': 1.0}
+
+
+def delai_appro_defaut(cat):
+    """Délai d'approvisionnement par défaut (mois) : 2 mois, sauf BOIS ROUGE = 1 mois."""
+    return DEFAULT_LEAD_TIME_PAR_CATEGORIE.get(str(cat).strip().upper(),
+                                               DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])
+
 
 CLASS_COLORS = {
     'Rupture': '#FFC7CE', 'Critique': '#FF8A8A', 'Stock faible': '#FFD9A0',
@@ -728,17 +738,11 @@ def charger_parametres_stock():
 
 
 def get_params_categorie(cat, params):
-    """Paramètres effectifs par catégorie.
-    Règle métier WOODMAT : délai commande → arrivée = 1 mois pour BOIS ROUGE,
-    2 mois pour toutes les autres catégories. Cette règle est fixe et prime
-    sur toute ancienne valeur de lead_time_mois enregistrée dans le JSON.
-    Les autres paramètres restent personnalisables par catégorie.
-    """
+    """Paramètres effectifs d'une catégorie : valeurs saisies dans Paramètres,
+    sinon repli sur DEFAULT_PARAMS_CATEGORIE (jamais déduites des données)."""
     p = (params or {}).get(cat, {})
-    cat_norm = str(cat).strip().upper()
-    delai_appro = 1.0 if cat_norm == 'BOIS ROUGE' else 2.0
     return {
-        'delai_appro_mois': delai_appro,
+        'delai_appro_mois': float(p.get('lead_time_mois', delai_appro_defaut(cat))),
         'seuil_rupture_mois': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
         'stock_securite_mois': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
         'stock_cible_mois': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible'])),
@@ -858,9 +862,9 @@ def _br_dim_key(d):
     return [int(x) for x in p] if p else [0]
 
 
-def generer_excel_bois_rouge(df_st_raw, date_max):
-    """Reconstruit la feuille Stock Bois Rouge (style identique à l'ancien outil desktop),
-    avec ENSO et STORA ENSO fusionnés en un seul fournisseur."""
+def _ecrire_feuille_bois_rouge(wb, df_st_raw, date_max):
+    """Écrit la feuille « Stock BOIS ROUGE » dans le classeur `wb`.
+    Renvoie (feuille_créée: bool, références non reconnues)."""
     # BOIS ROUGE + BOIS BLANC SUEDE (même famille ENSO/STORA ENSO) réunis dans le même tableau
     df_br = df_st_raw[df_st_raw['Catégorie'].isin(['BOIS ROUGE', 'BOIS BLANC SUEDE'])].copy()
     df_br['Quantité'] = parse_qty_series(df_br['Quantité'])
@@ -875,7 +879,7 @@ def generer_excel_bois_rouge(df_st_raw, date_max):
     df_br = df_br[(df_br['Quantité'] > 0) & df_br['_qual'].notna() & df_br['_four'].notna()].copy()
 
     if df_br.empty:
-        return None, non_reconnus
+        return False, non_reconnus
 
     br_qf = {}
     for q in BR_QUAL:
@@ -908,8 +912,6 @@ def generer_excel_bois_rouge(df_st_raw, date_max):
     thin = Side(style='thin', color='BBBBBB')
     brd = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
     ws = wb.create_sheet(title="Stock BOIS ROUGE")
     ws.sheet_view.showGridLines = False
     n_cols = len(br_flat)
@@ -1017,9 +1019,622 @@ def generer_excel_bois_rouge(df_st_raw, date_max):
         c.border = brd
 
     ws.freeze_panes = 'B4'
+    return True, non_reconnus
+
+
+def generer_excel_bois_rouge(df_st_raw, date_max):
+    """Reconstruit la feuille Stock Bois Rouge (style identique à l'ancien outil desktop),
+    avec ENSO et STORA ENSO fusionnés en un seul fournisseur."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ok, non_reconnus = _ecrire_feuille_bois_rouge(wb, df_st_raw, date_max)
+    if not ok:
+        return None, non_reconnus
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), non_reconnus
+
+
+# ============================================================
+# TABLEAU CROISÉ DE STOCK — TOUS LES PRODUITS
+# Une feuille par produit : Dimension × Fournisseur (ou Couleur), stock nul masqué,
+# unité en pied de feuille — même logique que les TCD Excel existants (Stock_par_produit).
+# ============================================================
+
+TCD_RESIDUEL = 0.05          # |qté| < 0,05 = reste d'arrondi JB, ignoré
+TCD_NP = 'Non précisé'
+
+# Colonnes du tableau par produit : (colonne 1, colonne 2)
+#   FOUR = fournisseur (JB « Texte 3 »)      COUL = couleur / type (JB « Texte 2 »)
+#   SECH = séchage AD/KD lu dans la désignation      None = pas de sous-colonne
+# Tout produit absent de cette table → colonnes = fournisseur seul.
+TCD_LAYOUT = {
+    'MDF DECORE': ('FOUR', 'COUL'), 'HIGH GLOSS': ('FOUR', 'COUL'),
+    'STRATIDECOR': ('COUL', None), 'STRATIDECOR KRONO': ('COUL', None), 'TEKNOLAM': ('COUL', None),
+    'ISOREL BRUT': ('FOUR', 'COUL'), 'ISOREL DECORE': ('FOUR', 'COUL'),
+    'CONTREPLAQUE': ('FOUR', 'COUL'), 'EXOTIQUE': ('FOUR', 'COUL'), 'HETRE': ('FOUR', 'COUL'),
+    'CHENE': ('FOUR', 'SECH'),
+}
+TCD_LIBELLES = {'FOUR': 'Fournisseur', 'COUL': 'Couleur / type', 'SECH': 'Séchage'}
+# Règles métier déjà validées (cf. notes des anciens fichiers)
+TCD_FOUR_FIXE = {"PIN D'OREGON": 'FALCON', 'HIGH GLOSS': 'KASTAMONU'}
+TCD_FOUR_ALIAS = {'CHURCH': 'BRYANT CHURCH', 'MAYER': 'MAYR', 'BATI TIMBER': 'FALCON'}
+TCD_UNITE_LIBELLE = {'M3': 'M³', 'M2': 'M²', 'P': 'pièces', 'ML': 'ML'}
+TCD_UNITE_FORMAT = {'M3': '#,##0.000', 'M2': '#,##0.00', 'P': '#,##0', 'ML': '#,##0.0'}
+TCD_ORDRE_PRODUITS = ['BOIS ROUGE', 'MDF DECORE', 'HIGH GLOSS', 'STRATIDECOR', 'STRATIDECOR KRONO',
+                      'TEKNOLAM', 'MDF', 'MDF HYDROFUGE', 'OSB', 'CONTREPLAQUE', 'ISOREL BRUT',
+                      'ISOREL DECORE', 'TRICAPA', 'POUTRES H20', 'BOIS BLANC', 'HETRE', 'CHENE',
+                      'FRENE', 'EXOTIQUE', "PIN D'OREGON", 'PARQUET']
+
+_RE_TCD_DIM = _re.compile(r'(\d{1,4}(?:[.,]\d+)?)\s*X\s*(\d{1,4}(?:[.,]\d+)?)(?:\s*X\s*(\d{1,3}(?:[.,]\d+)?))?')
+
+
+def _tcd_num(s):
+    """Quantités → float, SIGNE CONSERVÉ (un stock négatif doit rester visible)."""
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_numeric(s, errors='coerce').fillna(0.0)
+    t = (s.astype(str).str.strip().str.replace(' ', '', regex=False)
+          .str.replace(' ', '', regex=False).str.replace(',', '.', regex=False))
+    return pd.to_numeric(t, errors='coerce').fillna(0.0)
+
+
+def _tcd_col_unite(df):
+    """Même règle que calculer_indicateurs : l'unité fiable est celle d'ACHAT (« Unité P. »)."""
+    cols = list(df.columns)
+    for c in cols:
+        if str(c).strip().upper() == 'UNITÉ P.':
+            return c
+    for c in cols:
+        if str(c).strip().upper().startswith('UNIT') and 'P' in str(c).upper():
+            return c
+    for c in cols:
+        if str(c).strip().upper().startswith('UNIT') and 'V' in str(c).upper():
+            return c
+    return None
+
+
+def _tcd_unite(u):
+    u = str(u).strip().upper()
+    if u in ('M3', 'M³'):
+        return 'M3'
+    if u in ('M2', 'M²'):
+        return 'M2'
+    if u in ('P', 'PC', 'PCS', 'PIECE', 'PIÈCE', 'PIÈCES', 'PIECES'):
+        return 'P'
+    if u in ('ML', 'M/L', 'M.L'):
+        return 'ML'
+    return u or 'M3'
+
+
+def _tcd_txt(df, col):
+    """Colonne texte nettoyée (espaces, NaN → '')."""
+    if col not in df.columns:
+        return pd.Series('', index=df.index, dtype=object)
+    s = df[col].astype(str).str.strip().str.replace(r'\s+', ' ', regex=True)
+    return s.where(~s.str.lower().isin(['nan', 'none', 'nat']), '')
+
+
+def _tcd_unifier_casse(s):
+    """Fusionne les variantes de casse (Agadir / AGADIR) sous la graphie la plus fréquente."""
+    ok = s != ''
+    if not ok.any():
+        return s
+    best = s[ok].groupby(s[ok].str.casefold()).agg(lambda x: x.value_counts().index[0])
+    return s.str.casefold().map(best).fillna('')
+
+
+def _tcd_famille(cat):
+    c = str(cat).strip().upper()
+    if c.startswith('HETRE'):
+        return 'HETRE'
+    if c in ('BOIS ROUGE', 'BOIS BLANC SUEDE'):      # même famille ENSO/STORA ENSO
+        return 'BOIS ROUGE'
+    return c
+
+
+def _tcd_dim_from_text(txt):
+    """Dimension normalisée : 'LxlxÉp' (ex. 2800X2100X18) ou épaisseur seule ('38.1 mm')."""
+    t = str(txt if txt is not None else '').upper().replace('×', 'X')
+    if t in ('', 'NAN', 'NONE'):
+        return None
+    m = _RE_TCD_DIM.search(t)
+    if m:
+        return 'X'.join(g.replace(',', '.') for g in m.groups() if g)
+    m = _re.search(r'(\d+(?:[.,]\d+)?)\s*MM\b', t) or _re.fullmatch(r'\s*(\d+(?:[.,]\d+)?)\s*', t)
+    if m:
+        return f"{float(m.group(1).replace(',', '.')):g} mm"
+    return None
+
+
+_TCD_HETRE_FOUR = ['ABALON', 'BELES', 'ISKRALEGNO', 'PILANA', 'ROMANEX', 'MORE']
+_TCD_PAYS = {'CROITIE', 'CROATIE', 'ALLEMAGNE', 'AUTRICHE', 'ITALIE', 'SLOVENIE', 'ROMANIE', 'SERBIE', 'BOSNIE'}
+
+
+def _tcd_hetre(desi, ref):
+    """HÊTRE : fournisseur et qualité lus dans la désignation (le « Texte 3 » JB est parfois faux,
+    ex. BELES saisi ISKRALEGNO). Renvoie (fournisseur | None, qualité | None)."""
+    t = _re.sub(r'[_\s]+', ' ', f"{desi} {ref}".upper()).strip()
+    t_d = _re.sub(r'[_\s]+', ' ', str(desi).upper()).strip()
+    four = None
+    for f in _TCD_HETRE_FOUR:
+        if _re.search(r'\b' + f + r'\b', t_d) or (f != 'MORE' and f[:8] in t_d):
+            four = f
+            break
+    if four is None:
+        for tok in t_d.replace('HETRE', '', 1).split():
+            if tok not in _TCD_PAYS and tok.isalpha() and len(tok) > 3:
+                four = tok
+                break
+    if _re.search(r'SUPERIEUR|\bSUP\b|SUPCL', t):
+        if 'COLOR' in t or 'SUPCL' in t:
+            qual = 'Supérieur Color'
+        elif 'XXL' in t:
+            qual = 'Supérieur XXL'
+        else:
+            qual = 'Supérieur'
+    elif _re.search(r'NON AVIVE', t):
+        qual = 'Non Avivé'
+    elif _re.search(r'\bCND\b', t):
+        qual = 'CND'
+    elif 'PRIME' in t:
+        qual = 'Prime'
+    elif _re.search(r'\bASC\b', t):
+        qual = 'Avivé Court'
+    elif _re.search(r'\b(AVL|AVC|AVIVE)\b', t):
+        qual = 'Avivé'
+    else:
+        qual = None
+    return four, qual
+
+
+def _tcd_hetre_epaisseur(ref, desi):
+    """Épaisseur de secours (si « Texte 5 » est vide) : dernier nombre à 2 chiffres de la référence."""
+    for txt in (ref, desi):
+        nums = _re.findall(r'(?<![\d.])(\d{2})(?![\d])', _re.sub(r'\(.*?\)', ' ', str(txt)))
+        if nums:
+            return f"{int(nums[-1])} mm"
+    return None
+
+
+def _tcd_dim_key(d):
+    nums = _re.findall(r'\d+', str(d))
+    return (0, [int(x) for x in nums]) if nums else (1, [])
+
+
+def _tcd_nom_feuille(nom, deja):
+    base = _re.sub(r'[\[\]:*?/\\]', '-', str(nom))[:31]
+    n, i = base, 2
+    while n.lower() in deja:
+        suffixe = f" ({i})"
+        n = base[:31 - len(suffixe)] + suffixe
+        i += 1
+    deja.add(n.lower())
+    return n
+
+
+def _tcd_preparer(df_st_raw):
+    """Table à plat (une ligne par ligne de stock) : Famille, Unité, Ligne (dimension),
+    Colonne 1, Colonne 2, Quantité — + listes de points à vérifier."""
+    d = df_st_raw.copy()
+    verif = {'dim_inconnue': [], 'four_np': [], 'dim_divergente': [], 'ignores_residuels': 0,
+             'sans_categorie': 0, 'colonnes_absentes': []}
+    for c in ('Texte 2', 'Texte 3', 'Texte 5'):
+        if c not in d.columns:
+            verif['colonnes_absentes'].append(c)
+
+    d = d[d['Catégorie'].notna()].copy() if 'Catégorie' in d.columns else d.iloc[0:0].copy()
+    d['_qte'] = _tcd_num(d['Quantité']) if 'Quantité' in d.columns else 0.0
+    residuel = d['_qte'].abs() < TCD_RESIDUEL
+    verif['ignores_residuels'] = int(residuel.sum())
+    d = d[~residuel].copy()
+    if d.empty:
+        return d, verif
+
+    ucol = _tcd_col_unite(d)
+    d['Unité'] = d[ucol].map(_tcd_unite) if ucol else 'M3'
+    d['Famille'] = d['Catégorie'].map(_tcd_famille)
+    d['Référence_'] = _tcd_txt(d, 'Référence')
+    d['Désignation_'] = _tcd_txt(d, 'Désignation')
+    t2, t3, t5 = _tcd_txt(d, 'Texte 2'), _tcd_txt(d, 'Texte 3'), _tcd_txt(d, 'Texte 5')
+
+    four = t3.str.upper().replace(TCD_FOUR_ALIAS)
+    coul = _tcd_unifier_casse(t2)
+    sech = d['Désignation_'].str.upper().str.extract(r'\b(AD|KD)\b')[0].fillna('AD')
+
+    d['Ligne'], d['Colonne 1'], d['Colonne 2'] = '', '', ''
+    for fam in d['Famille'].unique():
+        m = d['Famille'] == fam
+        k1, k2 = TCD_LAYOUT.get(fam, ('FOUR', None))
+        f_fam = four[m].copy()
+        if fam in TCD_FOUR_FIXE:
+            f_fam[:] = TCD_FOUR_FIXE[fam]
+        f_fam = f_fam.where(f_fam != '', TCD_NP)
+
+        def val(k, premier):
+            if k == 'FOUR':
+                return f_fam
+            if k == 'COUL':
+                c = coul[m]
+                return c.where(c != '', TCD_NP) if premier else c
+            if k == 'SECH':
+                return sech[m]
+            return pd.Series('', index=d.index[m], dtype=object)
+        d.loc[m, 'Colonne 1'] = val(k1, True)
+        d.loc[m, 'Colonne 2'] = val(k2, False)
+        if fam == 'HETRE':
+            for idx in d.index[m]:
+                four_h, qual_h = _tcd_hetre(d.at[idx, 'Désignation_'], d.at[idx, 'Référence_'])
+                if four_h:
+                    d.at[idx, 'Colonne 1'] = four_h
+                d.at[idx, 'Colonne 2'] = qual_h or TCD_NP
+
+    # Dimension : « Texte 5 » (désignation si absente) ; BOIS BLANC : désignation prioritaire
+    dims = []
+    for fam, ref, desi, x5 in zip(d['Famille'], d['Référence_'], d['Désignation_'], t5.reindex(d.index)):
+        a, b = _tcd_dim_from_text(x5), _tcd_dim_from_text(desi)
+        if fam == 'BOIS BLANC':
+            dim = b or a
+            if a and b and a != b:
+                verif['dim_divergente'].append((ref, desi, x5, b))
+        else:
+            dim = a or b
+            if not dim and fam == 'HETRE':
+                dim = _tcd_hetre_epaisseur(ref, desi)
+        if not dim:
+            dim = 'INCONNU'
+            verif['dim_inconnue'].append((fam, ref, desi))
+        dims.append(dim)
+    d['Ligne'] = dims
+
+    d['Quantité_'] = d['_qte']
+    np_mask = (d['Colonne 1'] == TCD_NP) & (d['Famille'] != 'BOIS ROUGE')
+    verif['four_np'] = [(f, r, q, u) for f, r, q, u in
+                        zip(d.loc[np_mask, 'Famille'], d.loc[np_mask, 'Référence_'],
+                            d.loc[np_mask, 'Quantité_'], d.loc[np_mask, 'Unité'])]
+    return d, verif
+
+
+def _tcd_ecrire_feuille(wb, nom_feuille, titre, unite, lib_lignes, lib_colonnes, df_f, date_txt):
+    """Écrit un tableau Ligne × (Colonne 1 [, Colonne 2]) ; renvoie le total affiché (None si vide)."""
+    g = df_f.groupby(['Ligne', 'Colonne 1', 'Colonne 2'], as_index=False)['Quantité_'].sum()
+    g = g[g['Quantité_'].abs() >= 0.0005]                      # stock nul masqué
+    if g.empty:
+        return None
+
+    tot_c1 = g.groupby('Colonne 1')['Quantité_'].sum().sort_values(ascending=False)
+    tot_c12 = g.groupby(['Colonne 1', 'Colonne 2'])['Quantité_'].sum()
+    cols = []
+    for c1 in tot_c1.index:
+        sous = tot_c12.loc[c1].sort_values(ascending=False)
+        cols.extend((c1, c2) for c2 in sous.index)
+    has_c2 = any(c2 != '' for _, c2 in cols)
+    lignes = sorted(g['Ligne'].unique(), key=_tcd_dim_key)
+    piv = g.pivot_table(index='Ligne', columns=['Colonne 1', 'Colonne 2'], values='Quantité_',
+                        aggfunc='sum', fill_value=0.0)
+
+    fmt = TCD_UNITE_FORMAT.get(unite, '#,##0.000')
+    mf = lambda h: PatternFill("solid", fgColor=h)
+    thin = Side(style='thin', color='BBBBBB')
+    brd = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws = wb.create_sheet(title=nom_feuille)
+    ws.sheet_view.showGridLines = False
+    n_cols = len(cols) + 2                                       # libellé + colonnes + TOTAL
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    c = ws.cell(1, 1, titre)
+    c.font = Font(name='Arial', bold=True, size=13, color='FFFFFF')
+    c.fill = mf(BR_TITLE)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 28
+
+    h1, h2 = 3, (4 if has_c2 else 3)
+    first = h2 + 1
+    c = ws.cell(h1, 1, f"{lib_lignes} \\ {lib_colonnes}")
+    c.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+    c.fill = mf(BR_TITLE)
+    c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    c.border = brd
+    if has_c2:
+        ws.merge_cells(start_row=h1, start_column=1, end_row=h2, end_column=1)
+    ws.column_dimensions['A'].width = 24
+
+    ci = 2
+    while ci < len(cols) + 2:
+        c1 = cols[ci - 2][0]
+        span = sum(1 for cc in cols if cc[0] == c1)
+        if has_c2:
+            if span > 1:
+                ws.merge_cells(start_row=h1, start_column=ci, end_row=h1, end_column=ci + span - 1)
+            cell = ws.cell(h1, ci, c1)
+        else:
+            cell = ws.cell(h1, ci, c1)
+        cell.font = Font(name='Arial', bold=True, size=9, color='1A1A1A')
+        cell.fill = mf(BR_SUB)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = brd
+        for k in range(span):
+            col_i = ci + k
+            ws.column_dimensions[get_column_letter(col_i)].width = 13
+            if has_c2:
+                s = ws.cell(h2, col_i, cols[col_i - 2][1] or '')
+                s.font = Font(name='Arial', bold=False, size=8, color='1A1A1A')
+                s.fill = mf('EAD9CB')
+                s.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                s.border = brd
+            elif k > 0:
+                ws.cell(h1, col_i).border = brd
+        ci += span
+    c = ws.cell(h1, n_cols, 'TOTAL')
+    c.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+    c.fill = mf(BR_TOT)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+    c.border = brd
+    if has_c2:
+        ws.merge_cells(start_row=h1, start_column=n_cols, end_row=h2, end_column=n_cols)
+    ws.column_dimensions[get_column_letter(n_cols)].width = 14
+    ws.row_dimensions[h1].height = 30
+    if has_c2:
+        ws.row_dimensions[h2].height = 26
+
+    total_general = 0.0
+    col_tot = [0.0] * len(cols)
+    for ri, dim in enumerate(lignes):
+        row = first + ri
+        bg = BR_DIM1 if ri % 2 == 0 else BR_DIM2
+        c = ws.cell(row, 1, dim)
+        c.font = Font(name='Arial', size=9, color='3B1500')
+        c.fill = mf(bg)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        c.border = brd
+        tot_l = 0.0
+        for j, key in enumerate(cols):
+            v = float(piv.loc[dim, key]) if (dim in piv.index and key in piv.columns) else 0.0
+            col_tot[j] += v
+            tot_l += v
+            cell = ws.cell(row, 2 + j)
+            if abs(v) < 0.0005:
+                cell.fill = mf('F2F2F2')
+            else:
+                cell.value = round(v, 3)
+                cell.number_format = fmt
+                cell.fill = mf(bg)
+            cell.font = Font(name='Arial', size=9, color='3B1500')
+            cell.alignment = Alignment(horizontal='right', vertical='center')
+            cell.border = brd
+        total_general += tot_l
+        cell = ws.cell(row, n_cols, round(tot_l, 3) if abs(tot_l) >= 0.0005 else None)
+        cell.number_format = fmt
+        cell.font = Font(name='Arial', bold=True, size=9, color='5C2D0A')
+        cell.fill = mf(BR_SUB)
+        cell.alignment = Alignment(horizontal='right', vertical='center')
+        cell.border = brd
+
+    tot_row = first + len(lignes)
+    c = ws.cell(tot_row, 1, 'TOTAL')
+    c.font = Font(name='Arial', bold=True, size=10, color='FFFFFF')
+    c.fill = mf(BR_TOT)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+    c.border = brd
+    for j, v in enumerate(col_tot + [total_general]):
+        cell = ws.cell(tot_row, 2 + j, round(v, 3) if abs(v) >= 0.0005 else None)
+        cell.number_format = fmt
+        cell.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+        cell.fill = mf(BR_TOT)
+        cell.alignment = Alignment(horizontal='right', vertical='center')
+        cell.border = brd
+
+    ws.cell(tot_row + 2, 1, f"Unité : {TCD_UNITE_LIBELLE.get(unite, unite)}  |  Stock au {date_txt}").font = \
+        Font(name='Arial', italic=True, size=9, color='5C2D0A')
+    ws.freeze_panes = ws.cell(first, 2)
+    # impression : paysage, une page de large
+    ws.page_setup.orientation = 'landscape'
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = openpyxl.worksheet.properties.PageSetupProperties(fitToPage=True)
+    return total_general
+
+
+def tcd_produits(df_st_raw):
+    """Produits (feuilles) disponibles dans l'export stock."""
+    d, _ = _tcd_preparer(df_st_raw)
+    return sorted(d['Famille'].unique()) if not d.empty else []
+
+
+def generer_tcd_stock(df_st_raw, date_stock, produits=None):
+    """Tableau croisé de stock de TOUS les produits.
+    Renvoie (bytes xlsx | None, info) ; info['apercu'] = DataFrame de la Vue d'ensemble,
+    info['verif'] = points à vérifier."""
+    import openpyxl.worksheet.properties  # noqa: F401  (PageSetupProperties)
+    d, verif = _tcd_preparer(df_st_raw)
+    info = {'apercu': pd.DataFrame(), 'verif': verif, 'nb_feuilles': 0, 'br_non_reconnus': 0}
+    if produits:
+        d = d[d['Famille'].isin(produits)]
+    if d.empty:
+        return None, info
+    date_txt = pd.Timestamp(date_stock).strftime('%d/%m/%Y')
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ws_vue = wb.create_sheet("Vue d'ensemble")
+    noms = {"vue d'ensemble", 'notes & écarts', 'données'}
+
+    # Liste (produit, unité) triée
+    combos = d.groupby(['Famille', 'Unité']).size().reset_index()[['Famille', 'Unité']]
+    ordre = {p: i for i, p in enumerate(TCD_ORDRE_PRODUITS)}
+    combos['_o'] = combos['Famille'].map(lambda f: ordre.get(f, 999))
+    combos = combos.sort_values(['_o', 'Famille', 'Unité'])
+    nb_unites = d.groupby('Famille')['Unité'].nunique()
+
+    vue_rows = []
+    donnees = []          # lignes de la feuille Données
+    br_non_reconnus = 0
+    for fam, unite in zip(combos['Famille'], combos['Unité']):
+        sel = d[(d['Famille'] == fam) & (d['Unité'] == unite)].copy()
+        total_export = float(sel['Quantité_'].sum())
+        nom = fam if nb_unites[fam] == 1 else f"{fam} ({TCD_UNITE_LIBELLE.get(unite, unite)})"
+        nom = _tcd_nom_feuille(nom, noms)
+        affiche = None
+
+        if fam == 'BOIS ROUGE':
+            raw_br = df_st_raw.loc[sel.index].copy()
+            # mêmes règles que la feuille « Stock Bois Rouge » (grade + fournisseur lus dans la référence)
+            wb_tmp_ok, non_rec = _ecrire_feuille_bois_rouge(wb, raw_br, pd.Timestamp(date_stock))
+            br_non_reconnus += len(non_rec)
+            if wb_tmp_ok:
+                wb['Stock BOIS ROUGE'].title = nom
+                affiche = float(sum(
+                    _tcd_num(raw_br['Quantité'])[(raw_br['Référence'].map(_br_extract_qual).notna())
+                                                  & (raw_br['Référence'].map(_br_extract_four).notna())
+                                                  & (_tcd_num(raw_br['Quantité']) > 0)]))
+            for idx, r in sel.iterrows():
+                ref = r['Référence_']
+                donnees.append([fam, r['Catégorie'], unite, _br_extract_dim(ref, r.get('Texte 5')),
+                                _br_extract_qual(ref) or '', _br_extract_four(ref) or '',
+                                round(r['Quantité_'], 3), ref, r['Désignation_']])
+        else:
+            k1, k2 = TCD_LAYOUT.get(fam, ('FOUR', None))
+            lib_col = TCD_LIBELLES[k1] + (f" / {TCD_LIBELLES[k2]}" if k2 else '')
+            ep = sel['Ligne'].str.endswith(' mm').all()
+            lib_lig = 'Épaisseur' if ep else 'Dimension'
+            titre = f"{fam} — {lib_lig} x {lib_col}  |  Stock au {date_txt}"
+            affiche = _tcd_ecrire_feuille(wb, nom, titre, unite, lib_lig.upper(), lib_col.upper(), sel, date_txt)
+            if affiche is None:
+                wb.remove(wb[nom]) if nom in wb.sheetnames else None
+            for _, r in sel.iterrows():
+                donnees.append([fam, r['Catégorie'], unite, r['Ligne'], r['Colonne 1'], r['Colonne 2'],
+                                round(r['Quantité_'], 3), r['Référence_'], r['Désignation_']])
+        ecart = total_export - (affiche or 0.0)
+        vue_rows.append({
+            'PRODUIT': fam, 'UNITÉ': TCD_UNITE_LIBELLE.get(unite, unite),
+            'NB RÉFÉRENCES EN STOCK': int(sel['Référence_'].nunique()),
+            'STOCK TOTAL': round(total_export, 3), 'FEUILLE': nom if affiche is not None else '—',
+            'CONTRÔLE vs EXPORT': 'OK' if abs(ecart) < 0.001 else f"ÉCART {ecart:+.3f}",
+        })
+    info['nb_feuilles'] = len(vue_rows)
+    info['br_non_reconnus'] = br_non_reconnus
+    apercu = pd.DataFrame(vue_rows)
+    info['apercu'] = apercu
+
+    # ── Vue d'ensemble ──
+    mf = lambda h: PatternFill("solid", fgColor=h)
+    thin = Side(style='thin', color='BBBBBB')
+    brd = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws_vue.sheet_view.showGridLines = False
+    ws_vue.merge_cells('A1:F1')
+    c = ws_vue['A1']
+    c.value = f"WOODMAT — SYNTHÈSE DU STOCK PAR PRODUIT AU {date_txt}"
+    c.font = Font(name='Arial', bold=True, size=13, color='FFFFFF')
+    c.fill = mf(BR_TITLE)
+    c.alignment = Alignment(horizontal='center', vertical='center')
+    ws_vue.row_dimensions[1].height = 28
+    for j, h in enumerate(apercu.columns, start=1):
+        c = ws_vue.cell(3, j, h)
+        c.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+        c.fill = mf(BR_TOT)
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        c.border = brd
+    for i, row in enumerate(apercu.itertuples(index=False), start=4):
+        for j, v in enumerate(row, start=1):
+            c = ws_vue.cell(i, j, v)
+            c.font = Font(name='Arial', size=9)
+            c.border = brd
+            c.fill = mf(BR_DIM1 if i % 2 == 0 else BR_DIM2)
+            c.alignment = Alignment(horizontal='left' if j in (1, 5) else 'right', vertical='center')
+            if j == 4:
+                c.number_format = '#,##0.000'
+            if j == 5 and v != '—':
+                c.hyperlink = f"#'{v}'!A1"
+                c.font = Font(name='Arial', size=9, color='0563C1', underline='single')
+            if j == 6 and v != 'OK':
+                c.font = Font(name='Arial', size=9, bold=True, color='C00000')
+    n = 4 + len(apercu) + 1
+    ws_vue.cell(n, 1, "Les unités ne s'additionnent pas entre elles (m³, m², pièces, ML) : aucun total général n'est donné.").font = \
+        Font(name='Arial', italic=True, size=9)
+    ws_vue.cell(n + 1, 1, "Les produits sans stock réel (stock nul ou résiduel) n'apparaissent pas.").font = \
+        Font(name='Arial', italic=True, size=9)
+    for col, w in zip('ABCDEF', (22, 10, 14, 16, 26, 22)):
+        ws_vue.column_dimensions[col].width = w
+    ws_vue.row_dimensions[3].height = 30
+    ws_vue.freeze_panes = 'A4'
+
+    # ── Notes & écarts ──
+    ws_n = wb.create_sheet('Notes & écarts')
+    noms.add('notes & écarts')
+    lignes = [("NOTES, HYPOTHÈSES ET POINTS À VÉRIFIER", 'T'), ("Méthode", 'H'),
+              ("Source : export JB Manager « Produits » (colonne Quantité = stock actuel). Les mouvements ne sont pas utilisés.", ''),
+              ("Tableau croisé Dimension x Fournisseur (ou Couleur), une feuille par produit ; stock nul masqué ; unité en pied de feuille.", ''),
+              ("La feuille « Données » liste toutes les lignes prises en compte (Famille, Ligne, Colonne 1, Colonne 2).", ''),
+              ("Hypothèses de nettoyage", 'H'),
+              (f"• {verif['ignores_residuels']} ligne(s) avec une quantité résiduelle (|qté| < {TCD_RESIDUEL}) ignorée(s) : restes d'arrondi JB.", ''),
+              ("• Fournisseur : colonne « Texte 3 » de JB (« Non précisé » si vide). Couleur / type : « Texte 2 ». Dimension : « Texte 5 », sinon lue dans la désignation.", ''),
+              ("• BOIS ROUGE (+ BOIS BLANC SUEDE) : grade (US/V/VI/VII/SCHAAL) et fournisseur lus dans la référence ; ENSO = STORA ENSO.", ''),
+              ("• BOIS BLANC : dimension lue dans la désignation. CHÊNE : séchage AD/KD lu dans la désignation (sans mention = AD). "
+               "CHURCH → BRYANT CHURCH, MAYER → MAYR, BATI TIMBER → FALCON ; HIGH GLOSS = KASTAMONU ; PIN D'OREGON = FALCON.", ''),
+              ("Non géré automatiquement (à ajuster à la main si besoin) : regroupements de couleurs KASTAMONU (LIGHT GREY HGL/HGS, ANTRA DUZ), "
+               "nombre de fardeaux du MDF DÉCORÉ.", ''),
+              ("• HÊTRE : fournisseur et qualité lus dans la désignation (Avivé, Avivé Court, Non Avivé, CND, Prime, Supérieur, Supérieur Color, "
+               "Supérieur XXL) ; épaisseur = Texte 5.", '')]
+    if verif['colonnes_absentes']:
+        lignes.append((f"⚠ Colonnes absentes de l'export : {', '.join(verif['colonnes_absentes'])} — "
+                       "dimensions / fournisseurs déduits de la désignation ou « Non précisé ».", 'W'))
+    r = 1
+    for txt, kind in lignes:
+        c = ws_n.cell(r, 1, txt)
+        c.font = Font(name='Arial', bold=kind in ('T', 'H'), size=12 if kind == 'T' else 10,
+                      color='C00000' if kind == 'W' else '000000')
+        c.alignment = Alignment(wrap_text=True, vertical='top')
+        r += 1
+
+    def bloc(titre, entetes, rows):
+        nonlocal r
+        if not rows:
+            return
+        r += 1
+        ws_n.cell(r, 1, titre).font = Font(name='Arial', bold=True, size=10)
+        r += 1
+        for j, h in enumerate(entetes, start=1):
+            c = ws_n.cell(r, j, h)
+            c.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+            c.fill = mf(BR_TOT)
+        for row in rows:
+            r += 1
+            for j, v in enumerate(row, start=1):
+                ws_n.cell(r, j, v).font = Font(name='Arial', size=9)
+        r += 1
+    bloc("À vérifier dans JB — dimension introuvable (classée INCONNU)", ['Produit', 'Référence', 'Désignation'],
+         verif['dim_inconnue'])
+    bloc("À vérifier dans JB — fournisseur non renseigné", ['Produit', 'Référence', 'Stock', 'Unité'],
+         [(f, ref, round(q, 3), TCD_UNITE_LIBELLE.get(u, u)) for f, ref, q, u in verif['four_np']])
+    bloc("À vérifier dans JB — dimension différente entre Texte 5 et désignation (BOIS BLANC)",
+         ['Référence', 'Désignation', 'Texte 5', 'Dimension retenue'], verif['dim_divergente'])
+    ws_n.column_dimensions['A'].width = 60
+    for col in 'BCD':
+        ws_n.column_dimensions[col].width = 34
+
+    # ── Données ──
+    ws_d = wb.create_sheet('Données')
+    heads = ['Famille', 'Catégorie JB', 'Unité', 'Ligne (dimension)', 'Colonne 1', 'Colonne 2',
+             'Quantité', 'Référence', 'Désignation']
+    for j, h in enumerate(heads, start=1):
+        c = ws_d.cell(1, j, h)
+        c.font = Font(name='Arial', bold=True, size=9, color='FFFFFF')
+        c.fill = mf(BR_TOT)
+    for i, row in enumerate(donnees, start=2):
+        for j, v in enumerate(row, start=1):
+            ws_d.cell(i, j, v if v != '' else None)
+    ws_d.freeze_panes = 'A2'
+    ws_d.auto_filter.ref = f"A1:I{len(donnees) + 1}"
+    for col, w in zip('ABCDEFGHI', (18, 20, 8, 18, 18, 18, 12, 40, 50)):
+        ws_d.column_dimensions[col].width = w
+
+    # ordre des feuilles : Vue d'ensemble, produits, Notes, Données
+    ordre_f = [ws_vue.title] + [s for s in wb.sheetnames if s not in (ws_vue.title, 'Notes & écarts', 'Données')] \
+        + ['Notes & écarts', 'Données']
+    wb._sheets = [wb[n] for n in ordre_f]
+    wb.active = 0
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), info
 
 
 # ============================================================
@@ -1037,9 +1652,8 @@ if not os.path.exists(BASE_HISTORIQUE):
 inject_global_styles()
 
 MENU_ITEMS = [
-    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📊 Tableau croisé stock",
-    "📈 Analyses", "⚙️ Paramètres", "⚠️ Alertes",
-    "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"
+    "🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "⚙️ Paramètres", "⚠️ Alertes",
+    "📄 Rapports", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge", "📊 Tableau croisé stock"
 ]
 if user_can_manage_users():
     MENU_ITEMS.append("👥 Gestion des utilisateurs")
@@ -1056,7 +1670,8 @@ with st.sidebar:
     f_stock = None
     lancer = False
     # Show uploaders only on pages that need data imports/analysis generation.
-    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📊 Tableau croisé stock", "📈 Analyses", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge"]:
+    if page in ["🏠 Dashboard", "📦 Rotation du stock", "📦 Réapprovisionnement", "📈 Analyses", "📚 Historique", "😴 Stock dormant", "🪵 Stock Bois Rouge",
+                "📊 Tableau croisé stock"]:
         st.markdown("**1. Mouvements de l'année en cours** _(optionnel)_")
         f_mouv = st.file_uploader("Export ERP mouvements (ex : 2026)", type=["xlsx", "xls"], key="mouv")
 
@@ -1159,7 +1774,7 @@ if page == "⚙️ Paramètres":
         p = params.get(c, {})
         rows.append({
             'Catégorie': c,
-            'lead_time_mois': int(p.get('lead_time_mois', 1 if str(c).strip().upper() == 'BOIS ROUGE' else DEFAULT_PARAMS_CATEGORIE['lead_time_mois'])),
+            'lead_time_mois': int(p.get('lead_time_mois', delai_appro_defaut(c))),
             'stock_securite': float(p.get('stock_securite', DEFAULT_PARAMS_CATEGORIE['stock_securite'])),
             'seuil_rupture': float(p.get('seuil_rupture', DEFAULT_PARAMS_CATEGORIE['seuil_rupture'])),
             'stock_cible': float(p.get('stock_cible', DEFAULT_PARAMS_CATEGORIE['stock_cible']))
@@ -1209,89 +1824,6 @@ if page == "⚙️ Paramètres":
                     st.error('Impossible de supprimer le fichier de paramètres.')
             st.session_state.pop('parametres_stock', None)
             st.success('Paramètres réinitialisés.')
-    st.stop()
-
-if page == "📊 Tableau croisé stock":
-    st.markdown("<h2 class='woodmat-page-title'>📊 Tableau croisé stock</h2>", unsafe_allow_html=True)
-    df_st_raw = st.session_state.get('df_st_raw')
-    if df_st_raw is None or df_st_raw.empty:
-        st.info("Générez d'abord l'analyse avec le fichier Stock actuel.")
-        st.stop()
-
-    # Tableau croisé métier WOODMAT :
-    # Lignes = Dimension
-    # Colonnes = Fournisseur puis Couleur
-    # Valeurs = Somme de Quantité
-    def _find_col(df, candidates):
-        mapping = {str(c).strip().upper(): c for c in df.columns}
-        for candidate in candidates:
-            if candidate.upper() in mapping:
-                return mapping[candidate.upper()]
-        return None
-
-    # Dans le fichier stock WOODMAT :
-    # Texte 2 = Couleur, Texte 3 = Fournisseur, Texte 5 = Dimension.
-    dim_col = _find_col(df_st_raw, ['Texte 5', 'Texte5', 'Dimension', 'Dimensions'])
-    four_col = _find_col(df_st_raw, ['Texte 3', 'Texte3', 'Fournisseur', 'Supplier'])
-    color_col = _find_col(df_st_raw, ['Texte 2', 'Texte2', 'Couleur', 'Color'])
-    qty_col = _find_col(df_st_raw, ['Quantité', 'Quantite', 'Quantity'])
-
-    if dim_col is None or four_col is None or color_col is None or qty_col is None:
-        st.error("Impossible de construire le tableau croisé : il manque au moins une colonne Dimension, Fournisseur, Couleur ou Quantité dans le stock actuel.")
-        st.write({"Colonnes détectées": list(df_st_raw.columns)})
-        st.stop()
-
-    pivot_src = df_st_raw[[dim_col, four_col, color_col, qty_col]].copy()
-    pivot_src.columns = ['Dimension', 'Fournisseur', 'Couleur', 'Quantité']
-    pivot_src['Quantité'] = parse_qty_series(pivot_src['Quantité'])
-    pivot_src = pivot_src[pivot_src['Quantité'].notna()].copy()
-    pivot_src['Dimension'] = pivot_src['Dimension'].fillna('INCONNUE').astype(str).str.strip()
-    pivot_src['Fournisseur'] = pivot_src['Fournisseur'].fillna('INCONNU').astype(str).str.strip()
-    pivot_src['Couleur'] = pivot_src['Couleur'].fillna('INCONNUE').astype(str).str.strip()
-
-    categories_pivot = _find_col(df_st_raw, ['Catégorie', 'Categorie', 'Category'])
-    if categories_pivot:
-        pivot_src['Catégorie'] = df_st_raw.loc[pivot_src.index, categories_pivot].fillna('INCONNUE').astype(str).str.strip()
-        cats_pivot = sorted(pivot_src['Catégorie'].unique())
-        cat_choice = st.selectbox("Catégorie", ['Toutes'] + cats_pivot, key="pivot_stock_categorie")
-        if cat_choice != 'Toutes':
-            pivot_src = pivot_src[pivot_src['Catégorie'] == cat_choice]
-
-    pivot = pd.pivot_table(
-        pivot_src,
-        index='Dimension',
-        columns=['Fournisseur', 'Couleur'],
-        values='Quantité',
-        aggfunc='sum',
-        fill_value=0,
-        margins=True,
-        margins_name='TOTAL'
-    )
-
-    # Tri naturel des dimensions : 2800X2100 avant 3050X1200, etc.
-    def _dim_sort_key(v):
-        nums = _re.findall(r'\d+', str(v))
-        return [int(x) for x in nums] if nums else [999999]
-
-    if 'TOTAL' in pivot.index:
-        total_row = pivot.loc[['TOTAL']]
-        body = pivot.drop(index='TOTAL')
-        body = body.sort_index(key=lambda s: s.map(_dim_sort_key))
-        pivot = pd.concat([body, total_row])
-
-    pivot_display = pivot.copy()
-    if isinstance(pivot_display.columns, pd.MultiIndex):
-        pivot_display.columns = [
-            'TOTAL' if str(a) == 'TOTAL' and str(b) == '' else f"{a} | {b}"
-            for a, b in pivot_display.columns
-        ]
-    pivot_display = pivot_display.reset_index()
-    pivot_display = pivot_display.round(3)
-
-    st.caption("Lignes = Dimension · Colonnes = Fournisseur → Couleur · Valeurs = Somme de Quantité")
-    add_export_buttons(pivot_display, 'tableau_croise_stock', 'Stock croisé', date_max)
-    st.dataframe(pivot_display, use_container_width=True, height=560)
-
     st.stop()
 
 if page == "📚 Historique":
@@ -1603,7 +2135,7 @@ if page == "📈 Analyses":
                 return '🟡 À surveiller'
 
             flop_cols_display = [c for c in ['Référence','Designation','Cat','Sorties_12M','Stock','Couverture',
-                                              'Taux_Immob','Dern_Sortie','Jours_depuis_derniere_sortie','Score_FLOP'] if c in flop.columns]
+                                              'Taux_Immob','Dern_Entree','Dern_Sortie','Jours_depuis_derniere_sortie','Score_FLOP'] if c in flop.columns]
             flop_top = flop.sort_values('Score_FLOP', ascending=False).head(50).copy()
             flop_top['Classe_FLOP'] = flop_top['Score_FLOP'].apply(_classe_flop)
             st.markdown('#### ⚠️ FLOP — score multi-critères')
@@ -1751,6 +2283,41 @@ df_mv = st.session_state["df_mv"]
 date_max = st.session_state["date_max"]
 date_12m_debut = st.session_state["date_12m_debut"]
 
+if page == "📊 Tableau croisé stock":
+    st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=True)
+    st.caption("Tableau croisé du stock de TOUS les produits : une feuille par produit "
+               "(Dimension × Fournisseur / Couleur), stock nul masqué, unité en pied de feuille, "
+               "plus Vue d'ensemble, Notes & écarts et Données.")
+    _df_raw_tcd = st.session_state.get("df_st_raw")
+    if _df_raw_tcd is None or 'Catégorie' not in _df_raw_tcd.columns:
+        st.warning("Stock actuel introuvable — chargez l'export stock puis cliquez sur « Générer l'analyse ».")
+        st.stop()
+    _date_stock = st.date_input("Date du stock (affichée sur les feuilles)", value=pd.Timestamp(date_max).date(),
+                                format="DD/MM/YYYY", key="tcd_date_stock")
+    _prod_dispo = tcd_produits(_df_raw_tcd)
+    _prod_sel = st.multiselect("Produits à inclure (vide = tous ; ex. HETRE pour un fichier Hêtre seul)",
+                               _prod_dispo, default=[], key="tcd_produits")
+    _tcd_bytes, _tcd_info = generer_tcd_stock(_df_raw_tcd, _date_stock, _prod_sel or None)
+    if _tcd_bytes is None:
+        st.warning("Aucun stock exploitable trouvé dans l'export.")
+        st.stop()
+    _v = _tcd_info['verif']
+    if _v['colonnes_absentes']:
+        st.warning(f"Colonnes absentes de l'export : {', '.join(_v['colonnes_absentes'])} — "
+                   "dimensions / fournisseurs déduits de la désignation ou « Non précisé ».")
+    if _tcd_info['br_non_reconnus']:
+        st.warning(f"{_tcd_info['br_non_reconnus']} référence(s) BOIS ROUGE avec fournisseur non reconnu "
+                   "ne figurent pas dans la feuille BOIS ROUGE (voir colonne CONTRÔLE).")
+    _nb_pts = len(_v['dim_inconnue']) + len(_v['four_np']) + len(_v['dim_divergente'])
+    if _nb_pts:
+        st.info(f"{_nb_pts} point(s) à vérifier dans JB — détail dans la feuille « Notes & écarts ».")
+    st.download_button("⬇️ Télécharger le tableau croisé de stock (Excel)", _tcd_bytes,
+                       file_name=(f"Stock_{_prod_sel[0].replace(' ', '_')}_" if len(_prod_sel) == 1 else "Stock_par_produit_")
+                                 + f"{pd.Timestamp(_date_stock).strftime('%d_%m_%Y')}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    st.dataframe(_tcd_info['apercu'], use_container_width=True, height=520)
+    st.stop()
+
 st.caption(
     f"Analyse réalisée le : {date_max.strftime('%d/%m/%Y')}  |  "
     f"Fenêtre d'analyse : 12 et 4 derniers mois  |  "
@@ -1803,7 +2370,7 @@ st.markdown(f"<h2 class='woodmat-page-title'>{page}</h2>", unsafe_allow_html=Tru
 display_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class',
                  'S_12M', 'Moy_Mois_12M', 'S_4M', 'Moy_Mois_4M',
                  'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label',
-                 'Couverture', 'Taux_Immob', 'Dern_Sortie', 'Dern_Entree']
+                 'Couverture', 'Taux_Immob', 'Dern_Entree', 'Dern_Sortie']
 rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Class': 'Classification',
                'S_12M': 'Sorties 12M', 'Moy_Mois_12M': 'Moy/Mois 12M',
                'S_4M': 'Sorties 4M', 'Moy_Mois_4M': 'Moy/Mois 4M',
@@ -1811,7 +2378,7 @@ rename_cols = {'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Uni
                'Rotation_4M': 'Rotation 4M',
                'Tendance_Label': 'Tendance 4M vs 12M',
                'Couverture': 'Couv. (mois)', 'Taux_Immob': 'Immob. (%)',
-               'Dern_Sortie': 'Dern. Sortie', 'Dern_Entree': 'Dern. Entrée'}
+               'Dern_Entree': 'Dern. Entrée', 'Dern_Sortie': 'Dern. Sortie'}
 
 if page == "📦 Réapprovisionnement":
     st.caption("Aide à la décision basée sur les paramètres par catégorie (Délai d'approvisionnement, "
@@ -1819,7 +2386,7 @@ if page == "📦 Réapprovisionnement":
     _params = charger_parametres_stock()
     if not _params:
         st.warning("Aucun paramètre enregistré dans ⚙️ Paramètres — les valeurs par défaut sont utilisées "
-                   f"(Délai {DEFAULT_PARAMS_CATEGORIE['lead_time_mois']:.0f} mois, "
+                   f"(Délai {DEFAULT_PARAMS_CATEGORIE['lead_time_mois']:.0f} mois — {delai_appro_defaut('BOIS ROUGE'):.0f} mois pour BOIS ROUGE, "
                    f"Seuil de rupture {DEFAULT_PARAMS_CATEGORIE['seuil_rupture']:.0f} mois, "
                    f"Stock de sécurité {DEFAULT_PARAMS_CATEGORIE['stock_securite']:.0f} mois, "
                    f"Stock cible {DEFAULT_PARAMS_CATEGORIE['stock_cible']:.0f} mois).")
@@ -1842,7 +2409,8 @@ if page == "📦 Réapprovisionnement":
 
     rep_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Conso_Mensuelle_Moyenne',
                 'Couverture_Reappro', 'Delai_Appro_Mois', 'Seuil_Rupture_Mois', 'Stock_Securite_Mois',
-                'Stock_Cible_Mois', 'Sous_Stock_Securite', 'Risque_Reappro', 'Qte_Recommandee', 'Fiabilite']
+                'Stock_Cible_Mois', 'Sous_Stock_Securite', 'Risque_Reappro', 'Qte_Recommandee', 'Fiabilite',
+                'Dern_Entree', 'Dern_Sortie']
     rep_df = rep[[c for c in rep_cols if c in rep.columns]].rename(columns={
         'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité', 'Stock': 'Stock actuel',
         'Conso_Mensuelle_Moyenne': 'Conso. mensuelle moy. (4M réels)', 'Couverture_Reappro': 'Couverture (mois)',
@@ -1850,6 +2418,7 @@ if page == "📦 Réapprovisionnement":
         'Stock_Securite_Mois': 'Stock de sécurité (mois)', 'Stock_Cible_Mois': 'Stock cible (mois)',
         'Sous_Stock_Securite': 'Sous le stock de sécurité', 'Risque_Reappro': 'Risque',
         'Qte_Recommandee': 'Quantité recommandée', 'Fiabilite': 'Fiabilité',
+        'Dern_Entree': 'Dern. Entrée', 'Dern_Sortie': 'Dern. Sortie',
     })
     add_export_buttons(rep_df, 'reapprovisionnement', 'Réapprovisionnement', date_max)
     st.dataframe(rep_df.sort_values('Couverture (mois)', na_position='first'), use_container_width=True, height=520)
@@ -1893,11 +2462,11 @@ if page == "⚠️ Alertes":
         | f_risque['Risque_Reappro'].str.startswith('⚠️')
     ]
     alert_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'Risque_Reappro',
-                  'S_12M', 'S_4M', 'Dern_Sortie']
+                  'S_12M', 'S_4M', 'Dern_Entree', 'Dern_Sortie']
     alert_df = alert_df[[c for c in alert_cols if c in alert_df.columns]].rename(columns={
         'Designation': 'Désignation', 'Cat': 'Catégorie', 'Unite': 'Unité',
         'Class': 'Classification', 'Risque_Reappro': 'Risque de rupture (paramétré)',
-        'S_12M': 'Sorties 12M', 'S_4M': 'Sorties 4M', 'Dern_Sortie': 'Dern. Sortie'
+        'S_12M': 'Sorties 12M', 'S_4M': 'Sorties 4M', 'Dern_Entree': 'Dern. Entrée', 'Dern_Sortie': 'Dern. Sortie'
     })
     if 'Classification' in alert_df.columns:
         alert_df['Classification'] = badge_class(alert_df['Classification']) if 'badge_class' in globals() else alert_df['Classification']
@@ -1908,7 +2477,8 @@ if page == "⚠️ Alertes":
 if page == "📄 Rapports":
     st.caption("Exports disponibles pour la vue filtrée courante.")
     report_cols = ['Référence', 'Designation', 'Cat', 'Unite', 'Stock', 'Class', 'S_12M', 'Moy_Mois_12M',
-                   'S_4M', 'Moy_Mois_4M', 'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label']
+                   'S_4M', 'Moy_Mois_4M', 'Rotation_Actuelle', 'Rotation_12M', 'Rotation_4M', 'Tendance_Label',
+                   'Dern_Entree', 'Dern_Sortie']
     report_df = f[report_cols].rename(columns=rename_cols)
 
     # Résumé de la vue courante
